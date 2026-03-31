@@ -1,0 +1,9 @@
+/target/
+/classes/
+/scratch/
+/.cpcache/
+/.lsp/
+/.clj-kondo/.cache/
+doc/Confidential.adoc
+.nrepl-port
+*.log
