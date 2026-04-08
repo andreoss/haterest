@@ -1,0 +1,9 @@
+{:resources
+ {:author {:fields    {:id   {:type :long :identity true}
+                       :name {:type :string :required true}}
+           :relations {:books {:kind :has-many :target :book :via :author-id}}}
+  :book   {:fields    {:id        {:type :long :identity true}
+                       :title     {:type :string :required true}
+                       :year      {:type :long}
+                       :author-id {:type :long}}
+           :relations {:author {:kind :belongs-to :target :author :via :author-id}}}}}
