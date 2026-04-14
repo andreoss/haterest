@@ -1,5 +1,6 @@
 (ns hypermedia.api
   (:require [hypermedia.hal :as hal]
+            [hypermedia.health :as health]
             [hypermedia.route :as route]
             [hypermedia.schema :as schema]
             [hypermedia.store :as store]
@@ -46,7 +47,8 @@
 
 (defn- root-doc [model]
   (hal/document {}
-                (into {:self (hal/link "/")}
+                (into {:self (hal/link "/")
+                       :health (hal/link "/health")}
                       (for [k (:order model)
                             :let [resource (get-in model [:resources k])]]
                         [(:collection resource) (hal/link (:path resource))]))))
@@ -90,10 +92,21 @@
   (fn [request]
     (handler (update request :path-params #(into {} (map (fn [[k v]] [(keyword k) v])) %)))))
 
+(defn- health-endpoint [store]
+  (fn [_]
+    (let [report (health/report store)]
+      {:status  (if (health/up? report) 200 503)
+       :headers {"Content-Type" "application/json;charset=utf-8"}
+       :body    (json/write-value-as-string report mapper)})))
+
+(defn build [model]
+  {:model model :routes (route/routes model)})
+
 (defn handler [api store]
   (let [model  (:model api)
-        routes (mapv (fn [[path data]] [path (assoc data :get (endpoint model store data))])
-                     (:routes api))]
+        routes (conj (mapv (fn [[path data]] [path (assoc data :get (endpoint model store data))])
+                           (:routes api))
+                     ["/health" {:name :hypermedia.route/health :get (health-endpoint store)}])]
     (ring/ring-handler (ring/router routes)
                        (fn [_] (not-found))
                        {:middleware [keywordise-params]})))
