@@ -14,7 +14,7 @@
 
 (def dialect-types
   {:ansi     ansi-types
-   :h2       (assoc ansi-types :uuid "UUID")
+   :h2       (assoc ansi-types :uuid "UUID" :instant "TIMESTAMP WITH TIME ZONE")
    :postgres (assoc ansi-types :uuid "UUID" :text "TEXT" :instant "TIMESTAMP WITH TIME ZONE")
    :sqlite   {:long    "INTEGER"
               :string  "TEXT"
@@ -126,3 +126,56 @@
     (into [(str "SELECT COUNT(*) AS \"total\" FROM " (quoted (:table resource))
                 (when (seq predicates) (str " WHERE " (str/join " AND " predicates))))]
           (vals where))))
+
+(defn- write-columns [resource row]
+  (filterv #(contains? row %) (:field-order resource)))
+
+(defn insert [resource row]
+  (check-fields resource (keys row))
+  (let [fields (write-columns resource row)]
+    (into [(str "INSERT INTO " (quoted (:table resource))
+                " (" (str/join ", " (map #(quoted (get-in resource [:fields % :column])) fields)) ")"
+                " VALUES (" (str/join ", " (repeat (count fields) "?")) ")")]
+          (map #(get row %) fields))))
+
+(defn update-by-identity [resource id row]
+  (check-fields resource (keys row))
+  (let [fields (remove #(= % (:identity resource)) (write-columns resource row))]
+    (into [(str "UPDATE " (quoted (:table resource)) " SET "
+                (str/join ", " (map #(str (quoted (get-in resource [:fields % :column])) " = ?") fields))
+                " WHERE " (quoted (get-in resource [:fields (:identity resource) :column])) " = ?")]
+          (conj (mapv #(get row %) fields) id))))
+
+(defn delete-by-identity [resource id]
+  [(str "DELETE FROM " (quoted (:table resource))
+        " WHERE " (quoted (get-in resource [:fields (:identity resource) :column])) " = ?")
+   id])
+
+(def ^:private encoders
+  {:sqlite {:uuid str :boolean #(if % 1 0) :instant str :date str}})
+
+(def ^:private readers
+  {:uuid    (fn [v] (if (uuid? v) v (java.util.UUID/fromString (str v))))
+   :boolean (fn [v] (cond (boolean? v) v
+                          (number? v)  (not (zero? (long v)))
+                          :else        (Boolean/parseBoolean (str v))))
+   :instant (fn [v] (condp instance? v
+                      java.time.Instant        v
+                      java.time.OffsetDateTime (.toInstant ^java.time.OffsetDateTime v)
+                      java.sql.Timestamp       (.toInstant ^java.sql.Timestamp v)
+                      (java.time.Instant/parse (str v))))
+   :date    (fn [v] (condp instance? v
+                      java.time.LocalDate v
+                      java.sql.Date       (.toLocalDate ^java.sql.Date v)
+                      (java.time.LocalDate/parse (str v))))
+   :decimal (fn [v] (bigdec v))})
+
+(defn encode [dialect type value]
+  (if-let [f (and (some? value) (get-in encoders [dialect type]))]
+    (f value)
+    value))
+
+(defn decode [_ type value]
+  (if-let [f (and (some? value) (get readers type))]
+    (f value)
+    value))

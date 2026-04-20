@@ -75,3 +75,62 @@
          (schema/coerce :uuid "0-0-0-0-1")))
   (is (true? (schema/coerce :boolean "true")))
   (is (nil? (schema/coerce :long "seven"))))
+
+(def writable
+  (schema/parse
+   {:resources
+    {:author {:fields {:id {:type :uuid :identity true :generated true}
+                       :name {:type :string :required true}}}
+     :book   {:fields    {:id        {:type :uuid :identity true :generated true}
+                          :title     {:type :string :required true}
+                          :year      {:type :long}
+                          :author-id {:type :uuid}}
+              :relations {:author {:kind :belongs-to :target :author :via :author-id}}}}}))
+
+(def book (get-in writable [:resources :book]))
+
+(deftest marks-a-generated-identity
+  (is (true? (get-in book [:fields :id :generated?]))))
+
+(deftest rejects-generation-of-what-it-cannot-generate
+  (is (thrown? clojure.lang.ExceptionInfo
+               (schema/parse {:resources {:a {:fields {:id {:type :long :identity true :generated true}}}}})))
+  (is (thrown? clojure.lang.ExceptionInfo
+               (schema/parse {:resources {:a {:fields {:id {:type :uuid :identity true}
+                                                       :n  {:type :uuid :generated true}}}}}))))
+
+(deftest conforms-a-submitted-row
+  (let [{:keys [value errors]} (schema/conform book {:title "Dune" :year 1965} {})]
+    (is (empty? errors))
+    (is (= "Dune" (:title value)))
+    (is (= 1965 (:year value)))
+    (is (uuid? (:id value)))))
+
+(deftest conforms-numbers-arriving-as-text
+  (is (= 1965 (:year (:value (schema/conform book {:title "Dune" :year "1965"} {}))))))
+
+(deftest keeps-a-supplied-identity
+  (let [id (random-uuid)]
+    (is (= id (:id (:value (schema/conform book {:id (str id) :title "Dune"} {})))))))
+
+(deftest reports-a-missing-required-field
+  (is (= [:title] (mapv :field (:errors (schema/conform book {:year 1965} {}))))))
+
+(deftest a-partial-row-needs-nothing
+  (let [{:keys [value errors]} (schema/conform book {:year 1965} {:partial? true})]
+    (is (empty? errors))
+    (is (= {:year 1965} value))))
+
+(deftest reports-an-unknown-field
+  (is (= [:sneaky] (mapv :field (:errors (schema/conform book {:title "x" :sneaky 1} {}))))))
+
+(deftest reports-a-value-it-cannot-read
+  (is (= [:year] (mapv :field (:errors (schema/conform book {:title "x" :year "soon"} {}))))))
+
+(deftest reads-a-relation-given-as-a-link
+  (let [id (random-uuid)]
+    (is (= id (:author-id (:value (schema/conform book {:title "x" :author (str "/authors/" id)} {})))))
+    (is (= id (:author-id (:value (schema/conform book {:title "x" :author {:href (str "/authors/" id)}} {})))))))
+
+(deftest reports-a-link-it-cannot-read
+  (is (= [:author] (mapv :field (:errors (schema/conform book {:title "x" :author "/authors/nope"} {}))))))

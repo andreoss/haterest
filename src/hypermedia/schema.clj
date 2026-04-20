@@ -2,7 +2,9 @@
   (:require [clojure.string :as str]
             [malli.core :as m]
             [malli.error :as me])
-  (:import (java.time Instant LocalDate)
+  (:import (java.net URLDecoder)
+           (java.nio.charset StandardCharsets)
+           (java.time Instant LocalDate)
            (java.util UUID)))
 
 (def field-types
@@ -13,6 +15,7 @@
 (def Field
   [:map
    [:type :keyword]
+   [:generated {:optional true} :boolean]
    [:identity {:optional true} :boolean]
    [:required {:optional true} :boolean]
    [:column {:optional true} :keyword]])
@@ -59,8 +62,9 @@
          (assoc :name k
                 :column (or (:column spec) (column k))
                 :identity? (= k id)
+                :generated? (boolean (:generated spec))
                 :required? (boolean (or (:required spec) (= k id))))
-         (dissoc :identity :required))])
+         (dissoc :identity :required :generated))])
 
 (defn- normalise-relation [path id [k spec]]
   [k (assoc spec
@@ -107,6 +111,11 @@
            [r spec'] (:relations spec)
            :when (not (contains? names (:target spec')))]
        {:path [:resources k :relations r] :error :unknown-target :detail (:target spec')})
+     (for [[k spec] resources
+           [f spec'] (:fields spec)
+           :when (and (:generated spec')
+                      (or (not (:identity spec')) (not= :uuid (:type spec'))))]
+       {:path [:resources k :fields f] :error :cannot-generate})
      (for [[collection ks] (group-by #(or (:collection (val %)) (plural (key %))) resources)
            :when (< 1 (count ks))]
        {:path [:resources] :error :duplicate-collection :detail collection}))))
@@ -123,15 +132,64 @@
      :resources (into {} (map normalise-resource) (:resources config))}))
 
 (defn coerce [type value]
-  (try
-    (case type
-      (:string :text) (str value)
-      :long           (Long/parseLong value)
-      :double         (Double/parseDouble value)
-      :decimal        (bigdec value)
-      :boolean        (Boolean/parseBoolean value)
-      :uuid           (UUID/fromString value)
-      :instant        (Instant/parse value)
-      :date           (LocalDate/parse value)
-      nil)
-    (catch Exception _ nil)))
+  (when (some? value)
+    (try
+      (case type
+        (:string :text) (str value)
+        :long           (if (integer? value) (long value) (Long/parseLong (str value)))
+        :double         (if (number? value) (double value) (Double/parseDouble (str value)))
+        :decimal        (bigdec value)
+        :boolean        (if (boolean? value) value (Boolean/parseBoolean (str value)))
+        :uuid           (if (uuid? value) value (UUID/fromString (str value)))
+        :instant        (if (instance? Instant value) value (Instant/parse (str value)))
+        :date           (if (instance? LocalDate value) value (LocalDate/parse (str value)))
+        nil)
+      (catch Exception _ nil))))
+
+(defn- href-of [value]
+  (cond
+    (string? value) value
+    (map? value)    (or (:href value) (get value "href"))))
+
+(defn- last-segment [href]
+  (when-let [segment (some-> href (str/split #"/") last not-empty)]
+    (URLDecoder/decode segment StandardCharsets/UTF_8)))
+
+(defn- conform-entry [resource [k value]]
+  (let [field    (get-in resource [:fields k])
+        relation (get-in resource [:relations k])]
+    (cond
+      field
+      (if-let [coerced (coerce (:type field) value)]
+        {:entry [k coerced]}
+        (if (nil? value) {:entry [k nil]} {:error {:field k :error :unreadable}}))
+
+      (= :belongs-to (:kind relation))
+      (let [target  (get-in resource [:fields (:via relation)])
+            coerced (coerce (:type target) (last-segment (href-of value)))]
+        (if (some? coerced)
+          {:entry [(:via relation) coerced]}
+          {:error {:field k :error :unreadable}}))
+
+      :else {:error {:field k :error :unknown}})))
+
+(defn conform [resource row {:keys [partial? identity]}]
+  (let [outcomes (mapv #(conform-entry resource %) row)
+        given    (into {} (keep :entry) outcomes)
+        id       (:identity resource)
+        clash    (when (and identity (contains? given id) (not= (get given id) identity))
+                   {:field id :error :conflict})
+        value    (cond
+                   identity (assoc given id identity)
+                   (and (not partial?)
+                        (not (contains? given id))
+                        (get-in resource [:fields id :generated?]))
+                   (assoc given id (random-uuid))
+                   :else given)
+        missing  (when-not partial?
+                   (for [k (:field-order resource)
+                         :when (and (get-in resource [:fields k :required?])
+                                    (not (contains? value k)))]
+                     {:field k :error :missing}))]
+    {:value  value
+     :errors (into (vec (keep :error outcomes)) (concat (when clash [clash]) missing))}))

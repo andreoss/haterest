@@ -56,3 +56,31 @@
 (deftest refuses-criteria-that-are-not-fields
   (let [book (get-in model [:resources :book])]
     (is (thrown? clojure.lang.ExceptionInfo (sql/select book {:where {:sneaky 1}})))))
+
+(deftest builds-an-insert
+  (let [book (get-in model [:resources :book])]
+    (is (= ["INSERT INTO \"books\" (\"id\", \"title\") VALUES (?, ?)" 1 "Dune"]
+           (sql/insert book {:id 1 :title "Dune"})))))
+
+(deftest builds-an-update
+  (let [book (get-in model [:resources :book])]
+    (is (= ["UPDATE \"books\" SET \"title\" = ? WHERE \"id\" = ?" "Dune" 1]
+           (sql/update-by-identity book 1 {:title "Dune"})))))
+
+(deftest builds-a-delete
+  (let [book (get-in model [:resources :book])]
+    (is (= ["DELETE FROM \"books\" WHERE \"id\" = ?" 1]
+           (sql/delete-by-identity book 1)))))
+
+(deftest refuses-to-write-fields-outside-the-schema
+  (let [book (get-in model [:resources :book])]
+    (is (thrown? clojure.lang.ExceptionInfo (sql/insert book {:sneaky 1})))
+    (is (thrown? clojure.lang.ExceptionInfo (sql/update-by-identity book 1 {:sneaky 1})))))
+
+(deftest encodes-values-a-dialect-cannot-hold
+  (let [id (random-uuid)]
+    (is (= id (sql/encode :h2 :uuid id)))
+    (is (= (str id) (sql/encode :sqlite :uuid id)))
+    (is (= 1 (sql/encode :sqlite :boolean true)))
+    (is (= id (sql/decode :sqlite :uuid (str id))))
+    (is (true? (sql/decode :sqlite :boolean 1)))))
