@@ -45,7 +45,7 @@
 
 (deftest collection-embeds-items
   (let [body (:body (GET "/books"))]
-    (is (= "/books" (get-in body [:_links :self :href])))
+    (is (= "/books?page=0&size=20" (get-in body [:_links :self :href])))
     (is (= #{"Dune" "Messiah"} (set (map :title (get-in body [:_embedded :books])))))
     (is (= #{"/books/1" "/books/2"}
            (set (map #(get-in % [:_links :self :href]) (get-in body [:_embedded :books])))))))
@@ -68,7 +68,7 @@
 
 (deftest follows-a-has-many-association
   (let [body (:body (GET "/authors/1/books"))]
-    (is (= "/authors/1/books" (get-in body [:_links :self :href])))
+    (is (= "/authors/1/books?page=0&size=20" (get-in body [:_links :self :href])))
     (is (= 2 (count (get-in body [:_embedded :books]))))))
 
 (deftest reports-a-missing-item

@@ -2,13 +2,15 @@
   (:require [clojure.string :as str]
             [hypermedia.hal :as hal]
             [hypermedia.health :as health]
+            [hypermedia.page :as page]
             [hypermedia.problem :as problem]
             [hypermedia.route :as route]
             [hypermedia.schema :as schema]
             [hypermedia.store :as store]
             [hypermedia.uri :as uri]
             [jsonista.core :as json]
-            [reitit.ring :as ring]))
+            [reitit.ring :as ring]
+            [ring.middleware.params :as params]))
 
 (def ^:private mapper (json/object-mapper {:encode-key-fn name}))
 
@@ -44,10 +46,20 @@
                         [k (hal/link (uri/expand (:path relation) binding))]))]
     (hal/document props links)))
 
-(defn- collection-doc [resource rows self]
-  (hal/document {}
-                {:self (hal/link self)}
+(defn- collection-doc [resource rows base pageable total]
+  (hal/document {:page (page/descriptor pageable total)}
+                (page/links base pageable total)
                 {(:collection resource) (mapv #(item-doc resource %) rows)}))
+
+(defn- sliced [store resource base where request]
+  (let [pageable (page/parse resource (:query-params request))]
+    (if (seq (:errors pageable))
+      (problem/of 400 "the slice cannot be read"
+                  {:instance (:uri request) :errors (:errors pageable)})
+      (respond (collection-doc resource
+                               (store/query store resource (page/criteria pageable where))
+                               base pageable
+                               (store/total store resource {:where where}))))))
 
 (defn- root-doc [model]
   (hal/document {}
@@ -92,8 +104,8 @@
     (respond (item-doc resource row))
     (missing request)))
 
-(defn- handle-collection [store resource _]
-  (respond (collection-doc resource (store/query store resource {}) (:path resource))))
+(defn- handle-collection [store resource request]
+  (sliced store resource (:path resource) {} request))
 
 (defn- handle-association [model store resource relation request]
   (let [target (get-in model [:resources (:target relation)])
@@ -103,7 +115,7 @@
     (cond
       (nil? row) (missing request)
       (= :has-many (:kind relation))
-      (respond (collection-doc target (store/query store target {:where {(:via relation) id}}) self))
+      (sliced store target self {(:via relation) id} request)
       :else (if-let [linked (some->> (get row (:via relation)) (store/fetch store target))]
               (respond (item-doc target linked))
               (missing request)))))
@@ -188,7 +200,7 @@
                      ["/health" {:name :hypermedia.route/health :get (health-endpoint store)}])]
     (ring/ring-handler (ring/router routes)
                        (default-handler)
-                       {:middleware [keywordise-params]})))
+                       {:middleware [params/wrap-params keywordise-params]})))
 
 (defmacro defapi [sym config]
   (let [model (schema/parse (eval config))]
