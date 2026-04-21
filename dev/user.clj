@@ -7,10 +7,7 @@
 
 (defonce running (atom nil))
 
-(def seed
-  {:author {1 {:id 1 :name "Herbert"}}
-   :book   {1 {:id 1 :title "Dune" :year 1965 :author-id 1}
-            2 {:id 2 :title "Messiah" :year 1969 :author-id 1}}})
+(def seed {:author {} :book {}})
 
 (defn halt []
   (swap! running (fn [current] (some-> current :stop (apply [])) nil)))

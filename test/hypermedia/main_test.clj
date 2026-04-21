@@ -1,20 +1,42 @@
 (ns hypermedia.main-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is]]
             [hypermedia.main :as main]
             [jsonista.core :as json])
-  (:import (java.net HttpURLConnection URI)))
+  (:import (java.net URI)
+           (java.net.http HttpClient HttpClient$Version HttpRequest HttpRequest$BodyPublishers
+                          HttpResponse$BodyHandlers)
+           (java.time Duration)))
 
-(defn- fetch [port path]
-  (let [connection ^HttpURLConnection (.openConnection (.toURL (URI. (str "http://127.0.0.1:" port path))))]
-    (doto connection
-      (.setRequestProperty "Connection" "close")
-      (.setConnectTimeout 2000)
-      (.setReadTimeout 2000))
-    (let [status (.getResponseCode connection)
-          stream (if (< status 400) (.getInputStream connection) (.getErrorStream connection))
-          body   (json/read-value (slurp stream) json/keyword-keys-object-mapper)]
-      (.disconnect connection)
-      {:status status :body body})))
+(def ^:private client
+  (-> (HttpClient/newBuilder)
+      (.version HttpClient$Version/HTTP_1_1)
+      (.connectTimeout (Duration/ofSeconds 2))
+      (.build)))
+
+(defn- request
+  ([port method path] (request port method path nil))
+  ([port method path payload]
+   (let [body     (if payload
+                    (HttpRequest$BodyPublishers/ofString (json/write-value-as-string payload))
+                    (HttpRequest$BodyPublishers/noBody))
+         built    (cond-> (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" port path)))
+                              (.timeout (Duration/ofSeconds 2))
+                              (.header "Connection" "close")
+                              (.method (str/upper-case (name method)) body))
+                    payload (.header "Content-Type" "application/json"))
+         response (.send client (.build built) (HttpResponse$BodyHandlers/ofString))
+         text     (.body response)]
+     {:status   (.statusCode response)
+      :location (.orElse (.firstValue (.headers response) "location") nil)
+      :body     (when (seq text) (json/read-value text json/keyword-keys-object-mapper))})))
+
+(defn- serving [body]
+  (let [running (main/start {:schema   "example.edn"
+                             :database (str "jdbc:h2:mem:" (gensym "main") ";DB_CLOSE_DELAY=-1")
+                             :port     0
+                             :migrate  true})]
+    (try (body running) (finally ((:stop running))))))
 
 (deftest parses-options
   (let [options (main/options ["-s" "example.edn" "-d" "jdbc:h2:mem:x" "-p" "0"])]
@@ -23,27 +45,40 @@
     (is (= 0 (:port options)))))
 
 (deftest requires-a-schema-and-a-database
-  (is (seq (main/problems (main/options [])))))
+  (is (seq (main/problems (main/options []))))
+  (is (empty? (main/problems (main/options ["-s" "a" "-d" "b"])))))
 
 (deftest boots-from-a-schema-and-a-url
-  (let [running (main/start {:schema   "example.edn"
-                             :database (str "jdbc:h2:mem:" (gensym "main") ";DB_CLOSE_DELAY=-1")
-                             :port     0
-                             :migrate  true})]
-    (try
-      (is (pos? (:port running)))
-      (is (= "/books" (get-in (fetch (:port running) "/") [:body :_links :books :href])))
-      (is (= 200 (:status (fetch (:port running) "/health"))))
-      (is (= "up" (get-in (fetch (:port running) "/health") [:body :status])))
-      (is (= [] (get-in (fetch (:port running) "/books") [:body :_embedded :books])))
-      (finally ((:stop running))))))
+  (serving
+   (fn [running]
+     (let [port (:port running)]
+       (is (pos? port))
+       (is (= "/books" (get-in (request port :get "/") [:body :_links :books :href])))
+       (is (= 200 (:status (request port :get "/health"))))
+       (is (= "up" (get-in (request port :get "/health") [:body :status])))
+       (is (= [] (get-in (request port :get "/books") [:body :_embedded :books])))))))
+
+(deftest a-client-navigates-and-writes-by-link-alone
+  (serving
+   (fn [running]
+     (let [port    (:port running)
+           root    (:body (request port :get "/"))
+           authors (get-in root [:_links :authors :href])
+           books   (get-in root [:_links :books :href])
+           author  (request port :post authors {:name "Herbert"})
+           book    (request port :post books {:title "Dune" :year 1965 :author (:location author)})]
+       (is (= 201 (:status author)))
+       (is (= 201 (:status book)))
+       (is (= "Herbert" (get-in (request port :get (get-in book [:body :_links :author :href]))
+                                [:body :name])))
+       (let [owned (get-in (request port :get (get-in author [:body :_links :books :href])) [:body])]
+         (is (= ["Dune"] (map :title (get-in owned [:_embedded :books])))))
+       (is (= 1966 (get-in (request port :patch (:location book) {:year 1966}) [:body :year])))
+       (is (= 204 (:status (request port :delete (:location book)))))
+       (is (= 404 (:status (request port :get (:location book)))))))))
 
 (deftest reports-an-unreachable-store-as-unhealthy
-  (let [running (main/start {:schema   "example.edn"
-                             :database (str "jdbc:h2:mem:" (gensym "main") ";DB_CLOSE_DELAY=-1")
-                             :port     0
-                             :migrate  true})]
-    (try
-      (main/detach running)
-      (is (= 503 (:status (fetch (:port running) "/health"))))
-      (finally ((:stop running))))))
+  (serving
+   (fn [running]
+     (main/detach running)
+     (is (= 503 (:status (request (:port running) :get "/health")))))))
