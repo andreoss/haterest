@@ -84,3 +84,13 @@
     (is (= 1 (sql/encode :sqlite :boolean true)))
     (is (= id (sql/decode :sqlite :uuid (str id))))
     (is (true? (sql/decode :sqlite :boolean 1)))))
+
+(deftest pushes-order-and-slice-into-the-statement
+  (let [book (get-in model [:resources :book])]
+    (is (= ["SELECT \"id\", \"title\", \"author_id\" FROM \"books\" WHERE \"author_id\" = ? ORDER BY \"title\" ASC, \"id\" DESC LIMIT ? OFFSET ?"
+            1 5 10]
+           (sql/select book {:where {:author-id 1} :order [[:title :asc] [:id :desc]] :limit 5 :offset 10})))))
+
+(deftest refuses-an-order-outside-the-schema
+  (is (thrown? clojure.lang.ExceptionInfo
+               (sql/select (get-in model [:resources :book]) {:order [[:sneaky :asc]]}))))
