@@ -134,3 +134,8 @@
 
 (deftest reports-a-link-it-cannot-read
   (is (= [:author] (mapv :field (:errors (schema/conform book {:title "x" :author "/authors/nope"} {}))))))
+
+(deftest carries-a-curie
+  (is (= "rel" (:curie (schema/parse config))))
+  (is (= "x" (:curie (schema/parse (assoc config :curie "x")))))
+  (is (false? (:curie (schema/parse (assoc config :curie false))))))

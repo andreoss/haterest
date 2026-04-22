@@ -128,7 +128,8 @@
   (let [problems (errors config)]
     (when (seq problems)
       (throw (ex-info "invalid schema" {:type ::invalid :errors problems})))
-    {:order     (vec (sort (keys (:resources config))))
+    {:curie     (if (contains? config :curie) (:curie config) "rel")
+     :order     (vec (sort (keys (:resources config))))
      :resources (into {} (map normalise-resource) (:resources config))}))
 
 (defn coerce [type value]
