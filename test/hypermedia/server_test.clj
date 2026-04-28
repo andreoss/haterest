@@ -25,7 +25,7 @@
       (is (pos? (:port running)))
       (let [response (fetch (:port running) "/")]
         (is (= 200 (:status response)))
-        (is (= "/books" (get-in response [:body :_links :books :href]))))
+        (is (= "/books" (get-in response [:body :_links :rel:books :href]))))
       (let [response (fetch (:port running) "/books/1")]
         (is (= "Dune" (get-in response [:body :title]))))
       (finally ((:stop running))))))

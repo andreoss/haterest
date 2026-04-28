@@ -56,7 +56,7 @@
         href    (get-in author [:headers "Location"])
         book    (call handler :post "/books" {:title "Dune" :author href})]
     (is (= 201 (:status book)))
-    (is (= "Herbert" (get-in (call handler :get (get-in book [:body :_links :author :href]))
+    (is (= "Herbert" (get-in (call handler :get (get-in book [:body :_links :rel:author :href]))
                              [:body :name])))))
 
 (deftest replaces-and-creates-with-put

@@ -40,8 +40,8 @@
 (deftest root-links-every-collection
   (let [body (:body (GET "/"))]
     (is (= "/" (get-in body [:_links :self :href])))
-    (is (= "/authors" (get-in body [:_links :authors :href])))
-    (is (= "/books" (get-in body [:_links :books :href])))))
+    (is (= "/authors" (get-in body [:_links :rel:authors :href])))
+    (is (= "/books" (get-in body [:_links :rel:books :href])))))
 
 (deftest collection-embeds-items
   (let [body (:body (GET "/books"))]
@@ -54,7 +54,7 @@
   (let [body (:body (GET "/books/1"))]
     (is (= "Dune" (:title body)))
     (is (= "/books/1" (get-in body [:_links :self :href])))
-    (is (= "/books/1/author" (get-in body [:_links :author :href])))))
+    (is (= "/books/1/author" (get-in body [:_links :rel:author :href])))))
 
 (deftest item-hides-identity-and-foreign-keys
   (let [body (:body (GET "/books/1"))]
