@@ -23,6 +23,7 @@
 (def Relation
   [:map
    [:kind :keyword]
+   [:embed {:optional true} :boolean]
    [:target :keyword]
    [:via :keyword]])
 
@@ -67,10 +68,12 @@
          (dissoc :identity :required :generated))])
 
 (defn- normalise-relation [path id [k spec]]
-  [k (assoc spec
-            :name k
-            :path (str path "/{" (name id) "}/" (name k))
-            :rel k)])
+  [k (-> spec
+         (assoc :name k
+                :path (str path "/{" (name id) "}/" (name k))
+                :embed? (boolean (:embed spec))
+                :rel k)
+         (dissoc :embed))])
 
 (defn- normalise-resource [[k spec]]
   (let [collection (or (:collection spec) (plural k))

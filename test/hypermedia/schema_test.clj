@@ -139,3 +139,8 @@
   (is (= "rel" (:curie (schema/parse config))))
   (is (= "x" (:curie (schema/parse (assoc config :curie "x")))))
   (is (false? (:curie (schema/parse (assoc config :curie false))))))
+
+(deftest marks-a-relation-to-embed
+  (let [model (schema/parse (assoc-in config [:resources :book :relations :author :embed] true))]
+    (is (true? (get-in model [:resources :book :relations :author :embed?])))
+    (is (false? (get-in model [:resources :author :relations :books :embed?])))))

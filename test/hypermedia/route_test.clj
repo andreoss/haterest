@@ -35,3 +35,9 @@
 
 (deftest names-every-route
   (is (every? :name (map second (route/routes model)))))
+
+(deftest addresses-a-member-of-a-has-many-relation
+  (let [by-path (into {} (route/routes model))]
+    (is (contains? by-path "/authors/:id/books/:book-key"))
+    (is (= :association-member (get-in by-path ["/authors/:id/books/:book-key" :hypermedia/op])))
+    (is (not (contains? by-path "/books/:id/author/:author-key")))))
