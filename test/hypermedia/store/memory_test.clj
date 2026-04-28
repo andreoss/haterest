@@ -39,3 +39,8 @@
 
 (deftest probes
   (is (true? (store/probe subject))))
+
+(deftest matches-a-set
+  (is (= #{"Dune" "Emma"} (set (map :title (store/query subject book {:where {:id #{1 3}}})))))
+  (is (= 2 (store/total subject book {:where {:id #{1 3}}})))
+  (is (empty? (store/query subject book {:where {:id #{}}}))))

@@ -108,24 +108,38 @@
                           (str (quoted (get-in resource [:fields field :column]))
                                (if (= :desc direction) " DESC" " ASC")))))))
 
+(defn- values-of [value]
+  (if (coll? value) (vec (sort-by str value)) [value]))
+
+(defn- predicate [resource [field value]]
+  (let [column (quoted (get-in resource [:fields field :column]))]
+    (if (coll? value)
+      (if (empty? value)
+        {:sql "1 = 0" :params []}
+        {:sql (str column " IN (" (str/join ", " (repeat (count value) "?")) ")")
+         :params (values-of value)})
+      {:sql (str column " = ?") :params [value]})))
+
+(defn- where-clause [resource where]
+  (let [parts (mapv #(predicate resource %) where)]
+    {:sql    (when (seq parts) (str " WHERE " (str/join " AND " (map :sql parts))))
+     :params (vec (mapcat :params parts))}))
+
 (defn select [resource {:keys [where order limit offset]}]
   (check-fields resource (keys where))
-  (let [predicates (for [[field _] where]
-                     (str (quoted (get-in resource [:fields field :column])) " = ?"))]
+  (let [clause (where-clause resource where)]
     (into [(str (projection resource)
-                (when (seq predicates) (str " WHERE " (str/join " AND " predicates)))
+                (:sql clause)
                 (order-clause resource order)
                 (when limit " LIMIT ?")
                 (when offset " OFFSET ?"))]
-          (concat (vals where) (when limit [limit]) (when offset [offset])))))
+          (concat (:params clause) (when limit [limit]) (when offset [offset])))))
 
 (defn count-of [resource {:keys [where]}]
   (check-fields resource (keys where))
-  (let [predicates (for [[field _] where]
-                     (str (quoted (get-in resource [:fields field :column])) " = ?"))]
-    (into [(str "SELECT COUNT(*) AS \"total\" FROM " (quoted (:table resource))
-                (when (seq predicates) (str " WHERE " (str/join " AND " predicates))))]
-          (vals where))))
+  (let [clause (where-clause resource where)]
+    (into [(str "SELECT COUNT(*) AS \"total\" FROM " (quoted (:table resource)) (:sql clause))]
+          (:params clause))))
 
 (defn- write-columns [resource row]
   (filterv #(contains? row %) (:field-order resource)))

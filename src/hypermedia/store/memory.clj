@@ -1,9 +1,12 @@
 (ns hypermedia.store.memory
   (:require [hypermedia.store :as store]))
 
+(defn- holds? [expected actual]
+  (if (coll? expected) (contains? (set expected) actual) (= expected actual)))
+
 (defn- matching [rows where]
   (if (seq where)
-    (filter (fn [row] (every? (fn [[k v]] (= v (get row k))) where)) rows)
+    (filter (fn [row] (every? (fn [[k v]] (holds? v (get row k))) where)) rows)
     rows))
 
 (defn- ordered [rows order]

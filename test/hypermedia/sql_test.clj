@@ -94,3 +94,12 @@
 (deftest refuses-an-order-outside-the-schema
   (is (thrown? clojure.lang.ExceptionInfo
                (sql/select (get-in model [:resources :book]) {:order [[:sneaky :asc]]}))))
+
+(deftest matches-a-set-with-one-predicate
+  (let [book (get-in model [:resources :book])]
+    (is (= ["SELECT \"id\", \"title\", \"author_id\" FROM \"books\" WHERE \"id\" IN (?, ?)" 1 2]
+           (sql/select book {:where {:id #{1 2}}})))
+    (is (= ["SELECT \"id\", \"title\", \"author_id\" FROM \"books\" WHERE 1 = 0"]
+           (sql/select book {:where {:id #{}}})))
+    (is (= ["SELECT COUNT(*) AS \"total\" FROM \"books\" WHERE \"id\" IN (?, ?)" 1 2]
+           (sql/count-of book {:where {:id #{1 2}}})))))
