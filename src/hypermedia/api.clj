@@ -11,6 +11,7 @@
             [hypermedia.schema :as schema]
             [hypermedia.store :as store]
             [hypermedia.uri :as uri]
+            [hypermedia.urilist :as urilist]
             [jsonista.core :as json]
             [reitit.ring :as ring]
             [ring.middleware.params :as params]))
@@ -33,6 +34,8 @@
     :headers (merge {"Content-Type" (str hal/media-type ";charset=utf-8")} headers)
     :body    (when body (json/write-value-as-string body mapper))}))
 
+(def ^:private no-content {:status 204 :headers {} :body nil})
+
 (defn- as-type [media body]
   {:status  200
    :headers {"Content-Type" (str media ";charset=utf-8")}
@@ -54,25 +57,63 @@
 (defn- profile-href [resource]
   (str "/profile/" (name (:collection resource))))
 
-(defn- item-doc [model resource row]
-  (let [curie   (:curie model)
-        hidden  (conj (foreign-keys resource) (:identity resource))
-        binding {(:identity resource) (get row (:identity resource))}
-        props   (reduce (fn [m k] (if (or (hidden k) (not (contains? row k)))
-                                    m
-                                    (assoc m k (get row k))))
-                        {} (:field-order resource))
-        links   (into {:self    (hal/link (self-href resource row))
-                       :profile (hal/link (profile-href resource))}
-                      (for [[k relation] (:relations resource)]
-                        [(rel/curied curie k) (hal/link (uri/expand (:path relation) binding))]))]
-    (hal/document props links)))
+(defn- item-doc
+  ([model resource row] (item-doc model resource row nil))
+  ([model resource row embeds]
+   (let [curie   (:curie model)
+         hidden  (conj (foreign-keys resource) (:identity resource))
+         binding {(:identity resource) (get row (:identity resource))}
+         props   (reduce (fn [m k] (if (or (hidden k) (not (contains? row k)))
+                                     m
+                                     (assoc m k (get row k))))
+                         {} (:field-order resource))
+         links   (into {:self    (hal/link (self-href resource row))
+                        :profile (hal/link (profile-href resource))}
+                       (for [[k relation] (:relations resource)]
+                         [(rel/curied curie k) (hal/link (uri/expand (:path relation) binding))]))
+         nested  (into {}
+                       (for [[k {:keys [kind target index]}] embeds
+                             :let [relation (get-in resource [:relations k])
+                                   value    (if (= :belongs-to kind)
+                                              (some->> (get row (:via relation))
+                                                       (get index)
+                                                       (item-doc model target))
+                                              (mapv #(item-doc model target %)
+                                                    (get index (get row (:identity resource)) [])))]
+                             :when (some? value)]
+                         [k value]))]
+     (hal/document props links nested))))
 
-(defn- collection-doc [model resource rows base pageable total]
-  (hal/document {:page (page/descriptor pageable total)}
-                (assoc (page/links base pageable total)
-                       :profile (hal/link (profile-href resource)))
-                {(:collection resource) (mapv #(item-doc model resource %) rows)}))
+(defn- embeds-for [model store resource rows]
+  (into {}
+        (for [[k relation] (:relations resource)
+              :when (:embed? relation)
+              :let [target (get-in model [:resources (:target relation)])]]
+          [k (if (= :belongs-to (:kind relation))
+               (let [ids (into #{} (keep #(get % (:via relation))) rows)]
+                 {:kind   :belongs-to
+                  :target target
+                  :index  (if (seq ids)
+                            (into {} (map (juxt (:identity target) identity))
+                                  (store/query store target {:where {(:identity target) ids}}))
+                            {})})
+               (let [ids (into #{} (keep #(get % (:identity resource))) rows)]
+                 {:kind   :has-many
+                  :target target
+                  :index  (if (seq ids)
+                            (group-by #(get % (:via relation))
+                                      (store/query store target {:where {(:via relation) ids}}))
+                            {})}))])))
+
+(defn- collection-doc [model store resource rows base pageable total]
+  (let [embeds (embeds-for model store resource rows)]
+    (hal/document {:page (page/descriptor pageable total)}
+                  (assoc (page/links base pageable total)
+                         :profile (hal/link (profile-href resource)))
+                  {(:collection resource) (mapv #(item-doc model resource % embeds) rows)})))
+
+(defn- single-doc [model store resource row]
+  (item-doc model resource row (embeds-for model store resource [row])))
 
 (defn- root-doc [model]
   (let [curie (:curie model)]
@@ -122,12 +163,33 @@
                                       {:instance (:uri request) :errors errors})}
                 :else {:row value})))))
 
+(defn- resolve-href [target href]
+  (let [prefix (str (:path target) "/")]
+    (when (str/starts-with? href prefix)
+      (schema/coerce (get-in target [:fields (:identity target) :type])
+                     (uri/decode (subs href (count prefix)))))))
+
+(defn- referenced [target request]
+  (let [content-type (or (get-in request [:headers "content-type"]) "")]
+    (if-not (str/starts-with? content-type urilist/media-type)
+      {:problem (problem/of 415 "unsupported media type"
+                            {:instance (:uri request) :detail (str "send " urilist/media-type)})}
+      (let [raw   (:body request)
+            hrefs (urilist/parse (cond (nil? raw) nil (string? raw) raw :else (slurp raw)))
+            ids   (mapv #(resolve-href target %) hrefs)]
+        (if (some nil? ids)
+          {:problem (problem/of 422 "a reference does not name a resource of this kind"
+                                {:instance (:uri request)
+                                 :errors   (vec (for [[href id] (map vector hrefs ids) :when (nil? id)]
+                                                  {:field :uri :error :unreadable :detail href}))})}
+          {:ids ids})))))
+
 (defn- sliced [model store resource base where request]
   (let [pageable (page/parse resource (:query-params request))]
     (if (seq (:errors pageable))
       (problem/of 400 "the slice cannot be read"
                   {:instance (:uri request) :errors (:errors pageable)})
-      (respond (collection-doc model resource
+      (respond (collection-doc model store resource
                                (store/query store resource (page/criteria pageable where))
                                base pageable
                                (store/total store resource {:where where}))))))
@@ -137,7 +199,7 @@
 
 (defn- handle-item [model store resource request]
   (if-let [row (some->> (identity-of resource request) (store/fetch store resource))]
-    (respond (item-doc model resource row))
+    (respond (single-doc model store resource row))
     (missing request)))
 
 (defn- handle-association [model store resource relation request]
@@ -149,7 +211,7 @@
       (nil? row) (missing request)
       (= :has-many (:kind relation)) (sliced model store target self {(:via relation) id} request)
       :else (if-let [linked (some->> (get row (:via relation)) (store/fetch store target))]
-              (respond (item-doc model target linked))
+              (respond (single-doc model store target linked))
               (missing request)))))
 
 (defn- handle-create [model store resource request]
@@ -188,7 +250,65 @@
 (defn- handle-erase [store resource request]
   (let [id (identity-of resource request)]
     (if (and id (store/transact store (fn [tx] (store/erase! tx resource id))))
-      {:status 204 :headers {} :body nil}
+      no-content
+      (missing request))))
+
+(defn- bind-one [store target ids owner-id via]
+  (doseq [id ids] (store/amend! store target id {via owner-id})))
+
+(defn- handle-bind [model store resource relation request]
+  (let [target (get-in model [:resources (:target relation)])
+        id     (identity-of resource request)
+        owner  (some->> id (store/fetch store resource))
+        {:keys [ids problem]} (referenced target request)]
+    (cond
+      (nil? owner) (missing request)
+      problem      problem
+
+      (= :belongs-to (:kind relation))
+      (if (not= 1 (count ids))
+        (problem/of 422 "this relation holds one resource" {:instance (:uri request)})
+        (let [referent (store/fetch store target (first ids))]
+          (if (nil? referent)
+            (problem/of 422 "the referenced resource does not exist" {:instance (:uri request)})
+            (do (store/transact store (fn [tx] (store/amend! tx resource id {(:via relation) (first ids)})))
+                no-content))))
+
+      :else
+      (let [known (every? #(some? (store/fetch store target %)) ids)]
+        (if-not known
+          (problem/of 422 "the referenced resource does not exist" {:instance (:uri request)})
+          (do (store/transact
+               store
+               (fn [tx]
+                 (when (= :put (:request-method request))
+                   (doseq [row (store/query tx target {:where {(:via relation) id}})
+                           :when (not (contains? (set ids) (get row (:identity target))))]
+                     (store/amend! tx target (get row (:identity target)) {(:via relation) nil})))
+                 (bind-one tx target ids id (:via relation))))
+              no-content))))))
+
+(defn- handle-unbind [model store resource relation request]
+  (let [target (get-in model [:resources (:target relation)])
+        id     (identity-of resource request)
+        owner  (some->> id (store/fetch store resource))]
+    (cond
+      (nil? owner) (missing request)
+      (= :belongs-to (:kind relation))
+      (do (store/transact store (fn [tx] (store/amend! tx resource id {(:via relation) nil})))
+          no-content)
+      :else (missing request))))
+
+(defn- handle-unbind-member [model store resource relation request]
+  (let [target   (get-in model [:resources (:target relation)])
+        id       (identity-of resource request)
+        member   (some->> (get-in request [:path-params (route/member-variable relation)])
+                          (schema/coerce (get-in target [:fields (:identity target) :type])))
+        owner    (some->> id (store/fetch store resource))
+        referent (some->> member (store/fetch store target))]
+    (if (and owner referent (= id (get referent (:via relation))))
+      (do (store/transact store (fn [tx] (store/amend! tx target member {(:via relation) nil})))
+          no-content)
       (missing request))))
 
 (defn- endpoints [model store data]
@@ -202,8 +322,13 @@
                     :put    (partial handle-replace model store resource)
                     :patch  (partial handle-amend model store resource)
                     :delete (partial handle-erase store resource)}
-      :association {:get (partial handle-association model store resource relation)})))
-
+      :association (cond-> {:get (partial handle-association model store resource relation)
+                            :put (partial handle-bind model store resource relation)}
+                     (= :belongs-to (:kind relation))
+                     (assoc :delete (partial handle-unbind model store resource relation))
+                     (= :has-many (:kind relation))
+                     (assoc :post (partial handle-bind model store resource relation)))
+      :association-member {:delete (partial handle-unbind-member model store resource relation)})))
 
 (defn- negotiating [offers handlers]
   (reduce-kv (fn [m method handler]

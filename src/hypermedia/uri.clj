@@ -22,3 +22,6 @@
 
 (defn route-path [template]
   (str/replace template variable (fn [[_ v]] (str ":" v))))
+
+(defn decode [value]
+  (java.net.URLDecoder/decode (str value) StandardCharsets/UTF_8))

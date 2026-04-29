@@ -74,7 +74,8 @@
 (deftest it-states-what-a-resource-allows
   (is (= "GET, POST, OPTIONS" (get-in (call :options "/books") [:headers "Allow"])))
   (is (= "GET, PUT, PATCH, DELETE, OPTIONS" (get-in (call :options "/books/1") [:headers "Allow"])))
-  (is (= "GET, OPTIONS" (get-in (call :options "/books/1/author") [:headers "Allow"])))
+  (is (= "GET, PUT, DELETE, OPTIONS" (get-in (call :options "/books/1/author") [:headers "Allow"])))
+  (is (= "GET, POST, PUT, OPTIONS" (get-in (call :options "/authors/1/books") [:headers "Allow"])))
   (is (= "GET, OPTIONS" (get-in (call :options "/profile/books") [:headers "Allow"]))))
 
 (deftest a-refused-method-states-what-is-allowed

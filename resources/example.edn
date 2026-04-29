@@ -6,4 +6,4 @@
                        :title     {:type :string :required true}
                        :year      {:type :long}
                        :author-id {:type :uuid}}
-           :relations {:author {:kind :belongs-to :target :author :via :author-id}}}}}
+           :relations {:author {:kind :belongs-to :target :author :via :author-id :embed true}}}}}
