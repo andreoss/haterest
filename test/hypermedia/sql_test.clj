@@ -103,3 +103,12 @@
            (sql/select book {:where {:id #{}}})))
     (is (= ["SELECT COUNT(*) AS \"total\" FROM \"books\" WHERE \"id\" IN (?, ?)" 1 2]
            (sql/count-of book {:where {:id #{1 2}}})))))
+
+(deftest compiles-the-constant-statements-of-a-model
+  (let [compiled (sql/statements model)]
+    (is (= #{:author :book} (set (keys compiled))))
+    (is (= "SELECT \"id\", \"title\", \"author_id\" FROM \"books\" WHERE \"id\" = ?"
+           (get-in compiled [:book :by-identity])))
+    (is (= "DELETE FROM \"books\" WHERE \"id\" = ?" (get-in compiled [:book :delete])))
+    (is (= "SELECT COUNT(*) AS \"total\" FROM \"books\"" (get-in compiled [:book :count])))
+    (is (every? string? (vals (:book compiled))))))

@@ -26,7 +26,9 @@
 
 (defn start [{:keys [schema database port host migrate]}]
   (let [api   (config/api schema)
-        store (jdbc-store/open {:url database :model (:model api) :migrate? (boolean migrate)})
+        store (jdbc-store/open {:url database :model (:model api)
+                                :statements (:statements api)
+                                :migrate? (boolean migrate)})
         running (server/start (api/handler api store) {:port (or port 8080)
                                                        :host (or host "127.0.0.1")})]
     (assoc running

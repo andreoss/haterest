@@ -86,7 +86,7 @@
 (defn ddl [model dialect]
   (mapv #(create-table model dialect (get-in model [:resources %])) (creation-order model)))
 
-(defn- projection [resource]
+(defn projection [resource]
   (str "SELECT " (str/join ", " (map quoted (columns-of resource)))
        " FROM " (quoted (:table resource))))
 
@@ -193,3 +193,12 @@
   (if-let [f (and (some? value) (get readers type))]
     (f value)
     value))
+
+(defn statements [model]
+  (into {}
+        (for [k (:order model)
+              :let [resource (get-in model [:resources k])]]
+          [k {:projection   (projection resource)
+              :by-identity  (select-by-identity resource)
+              :delete       (first (delete-by-identity resource nil))
+              :count        (first (count-of resource {}))}])))

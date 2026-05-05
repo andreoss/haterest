@@ -26,10 +26,11 @@
   (cond-> criteria
     (:where criteria) (update :where #(encode-row dialect resource %))))
 
-(defrecord Jdbc [datasource model dialect]
+(defrecord Jdbc [datasource model dialect statements]
   store/Store
   (fetch [_ resource id]
-    (->> [(sql/select-by-identity resource) (sql/encode dialect (type-of resource (:identity resource)) id)]
+    (->> [(or (get-in statements [(:name resource) :by-identity]) (sql/select-by-identity resource))
+          (sql/encode dialect (type-of resource (:identity resource)) id)]
          (#(jdbc/execute-one! datasource % options))
          (decode-row dialect resource)))
   (query [_ resource criteria]
@@ -78,13 +79,13 @@
 (defn migrate! [datasource model dialect]
   (run! #(jdbc/execute! datasource [%]) (sql/ddl model dialect)))
 
-(defn open [{:keys [url model migrate?]}]
+(defn open [{:keys [url model migrate? statements]}]
   (let [dialect    (sql/dialect url)
         datasource (connection/->pool HikariDataSource
                                       (cond-> {:jdbcUrl url}
                                         (= :sqlite dialect) (assoc :maximumPoolSize 1)))]
     (when migrate? (migrate! datasource model dialect))
-    (->Jdbc datasource model dialect)))
+    (->Jdbc datasource model dialect (or statements (sql/statements model)))))
 
 (defn close [opened]
   (.close ^HikariDataSource (:datasource opened)))
