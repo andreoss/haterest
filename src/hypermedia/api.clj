@@ -11,6 +11,7 @@
             [hypermedia.rel :as rel]
             [hypermedia.route :as route]
             [hypermedia.schema :as schema]
+            [hypermedia.sql :as sql]
             [hypermedia.store :as store]
             [hypermedia.uri :as uri]
             [hypermedia.urilist :as urilist]
@@ -75,19 +76,24 @@
   (str "/profile/" (name (:collection resource))))
 
 (defn- item-doc
-  ([model resource row] (item-doc model resource row nil))
-  ([model resource row embeds]
+  ([model resource row] (item-doc model resource row nil nil))
+  ([model resource row embeds] (item-doc model resource row embeds nil))
+  ([model resource row embeds projection]
    (let [curie   (:curie model)
          hidden  (conj (foreign-keys resource) (:identity resource))
          binding {(:identity resource) (get row (:identity resource))}
+         shown   (if projection (:fields projection) (:field-order resource))
          props   (reduce (fn [m k] (if (or (hidden k) (not (contains? row k)))
                                      m
                                      (assoc m k (get row k))))
-                         {} (:field-order resource))
-         links   (into {:self    (hal/link (self-href resource row))
-                        :profile (hal/link (profile-href resource))}
-                       (for [[k relation] (:relations resource)]
-                         [(rel/curied curie k) (hal/link (uri/expand (:path relation) binding))]))
+                         {} shown)
+         links   (cond-> (into {:self    (hal/link (uri/expand (:self-template resource) binding))
+                                :profile (hal/link (:profile-path resource))}
+                               (for [[k relation] (:relations resource)]
+                                 [(rel/curied curie k) (hal/link (uri/expand (:path relation) binding))]))
+                   (seq (:projections resource))
+                   (assoc (rel/curied curie :projection)
+                          (hal/link (str (uri/expand (:self-template resource) binding) "{?projection}"))))
          nested  (into {}
                        (for [[k {:keys [kind target index]}] embeds
                              :let [relation (get-in resource [:relations k])
@@ -101,11 +107,16 @@
                          [k value]))]
      (hal/document props links nested))))
 
-(defn- embeds-for [model store resource rows]
+(defn- embedded-relations [resource projection]
+  (if projection
+    (keep #(get-in resource [:relations %]) (:embed projection))
+    (keep (fn [[_ relation]] (when (:embed? relation) relation)) (:relations resource))))
+
+(defn- embeds-for [model store resource rows projection]
   (into {}
-        (for [[k relation] (:relations resource)
-              :when (:embed? relation)
-              :let [target (get-in model [:resources (:target relation)])]]
+        (for [relation (embedded-relations resource projection)
+              :let [k      (:name relation)
+                    target (get-in model [:resources (:target relation)])]]
           [k (if (= :belongs-to (:kind relation))
                (let [ids (into #{} (keep #(get % (:via relation))) rows)]
                  {:kind   :belongs-to
@@ -122,15 +133,20 @@
                                       (store/query store target {:where {(:via relation) ids}}))
                             {})}))])))
 
-(defn- collection-doc [model store resource rows base pageable total]
-  (let [embeds (embeds-for model store resource rows)]
-    (hal/document {:page (page/descriptor pageable total)}
-                  (assoc (page/links base pageable total)
-                         :profile (hal/link (profile-href resource)))
-                  {(:collection resource) (mapv #(item-doc model resource % embeds) rows)})))
+(defn- searches-link [model resource]
+  (when (seq (:searches resource))
+    {(rel/curied (:curie model) :search) (hal/link (:search-path resource))}))
 
-(defn- single-doc [model store resource row]
-  (item-doc model resource row (embeds-for model store resource [row])))
+(defn- collection-doc [model store resource rows base pageable total projection]
+  (let [embeds (embeds-for model store resource rows projection)]
+    (hal/document {:page (page/descriptor pageable total)}
+                  (merge (page/links base pageable total)
+                         {:profile (hal/link (:profile-path resource))}
+                         (searches-link model resource))
+                  {(:collection resource) (mapv #(item-doc model resource % embeds projection) rows)})))
+
+(defn- single-doc [model store resource row projection]
+  (item-doc model resource row (embeds-for model store resource [row] projection) projection))
 
 (defn- root-doc [model]
   (let [curie (:curie model)]
@@ -150,12 +166,29 @@
                                 (for [k (:order model)
                                       :let [resource (get-in model [:resources k])]]
                                   [(rel/curied curie (:collection resource))
-                                   (hal/link (profile-href resource))]))
+                                   (hal/link (:profile-path resource))]))
                     (rel/curies curie) (assoc :curies (rel/curies curie))))))
+
+(defn- searches-doc [model resource]
+  (let [curie (:curie model)]
+    (hal/document {}
+                  (into {:self (hal/link (:search-path resource))}
+                        (for [[k search] (:searches resource)]
+                          [(rel/curied curie k) (hal/link (:template search))])))))
 
 (defn- identity-of [resource request]
   (some->> (get-in request [:path-params (:identity resource)])
            (schema/coerce (get-in resource [:fields (:identity resource) :type]))))
+
+(defn- projection-of [resource request]
+  (if-let [asked (get-in request [:query-params "projection"])]
+    (if-let [found (get-in resource [:projections (keyword asked)])]
+      {:projection found}
+      {:problem (problem/of 400 "no such projection"
+                            {:instance (:uri request)
+                             :detail   (str "this resource offers "
+                                            (str/join ", " (map name (keys (:projections resource))))) })})
+    {}))
 
 (defn- body-of [request]
   (let [content-type (or (get-in request [:headers "content-type"]) "")]
@@ -208,25 +241,45 @@
 (defn- precondition-failed [request]
   (problem/of 412 "the resource has moved on since it was read" {:instance (:uri request)}))
 
+(defn- query-suffix [request]
+  (let [kept (select-keys (:query-params request) ["projection"])]
+    (if (seq kept)
+      (str "&" (str/join "&" (for [[k v] kept] (str k "=" (uri/encode v)))))
+      "")))
+
 (defn- sliced [model store resource base where request]
-  (let [pageable (page/parse resource (:query-params request))]
-    (if (seq (:errors pageable))
+  (let [pageable (page/parse resource (:query-params request))
+        {:keys [projection problem]} (projection-of resource request)]
+    (cond
+      problem problem
+      (seq (:errors pageable))
       (problem/of 400 "the slice cannot be read"
                   {:instance (:uri request) :errors (:errors pageable)})
-      (document resource :collection
-                (collection-doc model store resource
-                                (store/query store resource (page/criteria pageable where))
-                                base pageable
-                                (store/total store resource {:where where}))))))
+      :else
+      (let [rows  (store/query store resource (page/criteria pageable where))
+            total (store/total store resource {:where where})
+            doc   (collection-doc model store resource rows base pageable total projection)
+            extra (query-suffix request)]
+        (document resource :collection
+                  (if (str/blank? extra)
+                    doc
+                    (update doc :_links
+                            #(reduce-kv (fn [m rel link]
+                                          (assoc m rel (if (str/includes? (:href link) "page=")
+                                                         (update link :href str extra)
+                                                         link)))
+                                        {} %))))))))
 
 (defn- fresh? [request row]
   (etag/matches? (get-in request [:headers "if-none-match"]) (etag/of row)))
 
 (defn- item-response [model store resource row request]
-  (if (fresh? request row)
-    {:status 304 :headers {"ETag" (etag/of row)} :body nil}
-    (document resource :item (single-doc model store resource row) 200
-              {"ETag" (etag/of row)})))
+  (let [{:keys [projection problem]} (projection-of resource request)]
+    (cond
+      problem            problem
+      (fresh? request row) {:status 304 :headers {"ETag" (etag/of row)} :body nil}
+      :else (document resource :item (single-doc model store resource row projection) 200
+                      {"ETag" (etag/of row)}))))
 
 (defn- handle-collection [model store resource request]
   (sliced model store resource (:path resource) {} request))
@@ -235,6 +288,22 @@
   (if-let [row (some->> (identity-of resource request) (store/fetch store resource))]
     (item-response model store resource row request)
     (missing request)))
+
+(defn- handle-search-index [model resource _]
+  (document resource :search-index (searches-doc model resource)))
+
+(defn- handle-search [model store resource search request]
+  (let [given   (:query-params request)
+        clauses (for [field (:predicates search)
+                      :let [value (get given (name field))]
+                      :when (some? value)]
+                  [field (schema/coerce (get-in resource [:fields field :type]) value)])]
+    (if (some (comp nil? second) clauses)
+      (problem/of 400 "a predicate cannot be read"
+                  {:instance (:uri request)
+                   :errors   (vec (for [[field value] clauses :when (nil? value)]
+                                    {:field field :error :unreadable}))})
+      (sliced model store resource (:path search) (into {} clauses) request))))
 
 (defn- handle-association [model store resource relation request]
   (let [target (get-in model [:resources (:target relation)])
@@ -255,7 +324,9 @@
                         (fn [tx]
                           (let [stored (store/create! tx resource row)]
                             (document resource :item (item-doc model resource stored) 201
-                                      {"Location" (self-href resource stored)
+                                      {"Location" (uri/expand (:self-template resource)
+                                                              {(:identity resource)
+                                                               (get stored (:identity resource))})
                                        "ETag"     (etag/of stored)})))))))
 
 (defn- handle-replace [model store resource request]
@@ -263,25 +334,26 @@
         current (some->> id (store/fetch store resource))
         {:keys [row problem]} (submitted resource request {:identity id})]
     (cond
-      (nil? id)                        (missing request)
-      problem                          problem
+      (nil? id)                              (missing request)
+      problem                                problem
       (and current (stale? request current)) (precondition-failed request)
       :else (store/transact
              store
              (fn [tx]
                (let [{:keys [created? row]} (store/replace! tx resource id row)]
                  (document resource :item (item-doc model resource row) (if created? 201 200)
-                           {"Location" (self-href resource row) "ETag" (etag/of row)})))))))
+                           {"Location" (uri/expand (:self-template resource) {(:identity resource) id})
+                            "ETag"     (etag/of row)})))))))
 
 (defn- handle-amend [model store resource request]
   (let [id      (identity-of resource request)
         current (some->> id (store/fetch store resource))
         {:keys [row problem]} (submitted resource request {:partial? true})]
     (cond
-      (nil? id)                        (missing request)
-      problem                          problem
-      (nil? current)                   (missing request)
-      (stale? request current)         (precondition-failed request)
+      (nil? id)                (missing request)
+      problem                  problem
+      (nil? current)           (missing request)
+      (stale? request current) (precondition-failed request)
       :else (store/transact
              store
              (fn [tx]
@@ -330,7 +402,7 @@
              store
              (fn [tx]
                (when (= :put (:request-method request))
-                 (doseq [row  (store/query tx target {:where {(:via relation) id}})
+                 (doseq [row   (store/query tx target {:where {(:via relation) id}})
                          :when (not (contains? (set ids) (get row (:identity target))))]
                    (store/amend! tx target (get row (:identity target)) {(:via relation) nil})))
                (bind-one tx target ids id (:via relation))))
@@ -340,8 +412,8 @@
   (let [id    (identity-of resource request)
         owner (some->> id (store/fetch store resource))]
     (cond
-      (nil? owner)                    (missing request)
-      (stale? request owner)          (precondition-failed request)
+      (nil? owner)           (missing request)
+      (stale? request owner) (precondition-failed request)
       (= :belongs-to (:kind relation))
       (do (store/transact store (fn [tx] (store/amend! tx resource id {(:via relation) nil})))
           no-content)
@@ -361,21 +433,24 @@
 
 (defn- endpoints [model store data]
   (let [resource (get-in model [:resources (:hypermedia/resource data)])
-        relation (:hypermedia/relation data)]
+        relation (:hypermedia/relation data)
+        search   (:hypermedia/search data)]
     (case (:hypermedia/op data)
-      :root        {:get (fn [_] (document nil :root (root-doc model)))}
-      :collection  {:get  (partial handle-collection model store resource)
-                    :post (partial handle-create model store resource)}
-      :item        {:get    (partial handle-item model store resource)
-                    :put    (partial handle-replace model store resource)
-                    :patch  (partial handle-amend model store resource)
-                    :delete (partial handle-erase store resource)}
-      :association (cond-> {:get (partial handle-association model store resource relation)
-                            :put (partial handle-bind model store resource relation)}
-                     (= :belongs-to (:kind relation))
-                     (assoc :delete (partial handle-unbind model store resource relation))
-                     (= :has-many (:kind relation))
-                     (assoc :post (partial handle-bind model store resource relation)))
+      :root         {:get (fn [_] (document nil :root (root-doc model)))}
+      :collection   {:get  (partial handle-collection model store resource)
+                     :post (partial handle-create model store resource)}
+      :item         {:get    (partial handle-item model store resource)
+                     :put    (partial handle-replace model store resource)
+                     :patch  (partial handle-amend model store resource)
+                     :delete (partial handle-erase store resource)}
+      :search-index {:get (partial handle-search-index model resource)}
+      :search       {:get (partial handle-search model store resource search)}
+      :association  (cond-> {:get (partial handle-association model store resource relation)
+                             :put (partial handle-bind model store resource relation)}
+                      (= :belongs-to (:kind relation))
+                      (assoc :delete (partial handle-unbind model store resource relation))
+                      (= :has-many (:kind relation))
+                      (assoc :post (partial handle-bind model store resource relation)))
       :association-member {:delete (partial handle-unbind-member model store resource relation)})))
 
 (defn- negotiating [offers handlers]
@@ -427,7 +502,7 @@
             :options (fn [_] {:status 200 :headers {"Allow" "GET, OPTIONS"} :body nil})}])))
 
 (defn build [model]
-  {:model model :routes (route/routes model)})
+  {:model model :routes (route/routes model) :statements (sql/statements model)})
 
 (defn- keywordise-params [handler]
   (fn [request]
@@ -448,10 +523,12 @@
                          (:routes api))
                    (into (profile-routes model))
                    (conj ["/health" {:name :hypermedia.route/health :get (health-endpoint store)}]))]
-    (ring/ring-handler (ring/router routes)
+    (ring/ring-handler (ring/router routes {:conflicts nil})
                        (default-handler)
                        {:middleware [params/wrap-params keywordise-params]})))
 
 (defmacro defapi [sym config]
   (let [model (schema/parse (eval config))]
-    `(def ~sym {:model ~model :routes ~(route/routes model)})))
+    `(def ~sym {:model      ~model
+                :routes     ~(route/routes model)
+                :statements ~(sql/statements model)})))

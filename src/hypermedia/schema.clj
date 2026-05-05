@@ -27,8 +27,19 @@
    [:target :keyword]
    [:via :keyword]])
 
+(def Projection
+  [:map
+   [:fields [:vector :keyword]]
+   [:embed {:optional true} [:vector :keyword]]])
+
+(def Search
+  [:map
+   [:predicates [:vector :keyword]]])
+
 (def Resource
   [:map
+   [:projections {:optional true} [:map-of :keyword Projection]]
+   [:searches {:optional true} [:map-of :keyword Search]]
    [:collection {:optional true} :keyword]
    [:table {:optional true} :keyword]
    [:field-order {:optional true} [:vector :keyword]]
@@ -68,21 +79,41 @@
          (dissoc :identity :required :generated))])
 
 (defn- normalise-relation [path id [k spec]]
-  [k (-> spec
-         (assoc :name k
-                :path (str path "/{" (name id) "}/" (name k))
-                :embed? (boolean (:embed spec))
-                :rel k)
-         (dissoc :embed))])
+  (let [self (str path "/{" (name id) "}/" (name k))]
+    [k (-> spec
+           (assoc :name k
+                  :path self
+                  :member-template (when (= :has-many (:kind spec))
+                                     (str self "/{" (name (:target spec)) "-key}"))
+                  :embed? (boolean (:embed spec))
+                  :rel k)
+           (dissoc :embed))]))
+
+(defn- normalise-projection [[k spec]]
+  [k {:name   k
+      :fields (vec (:fields spec))
+      :embed  (vec (:embed spec))}])
+
+(defn- normalise-search [path [k spec]]
+  [k {:name       k
+      :predicates (vec (:predicates spec))
+      :path       (str path "/search/" (name k))
+      :template   (str path "/search/" (name k)
+                       "{?" (str/join "," (map name (:predicates spec))) ",page,size,sort}")}])
 
 (defn- normalise-resource [[k spec]]
   (let [collection (or (:collection spec) (plural k))
         path       (str "/" (name collection))
         id         (identity-field (:fields spec))
         fields     (into {} (map (partial normalise-field id)) (:fields spec))]
-    [k {:name        k
-        :collection  collection
-        :path        path
+    [k {:name          k
+        :collection    collection
+        :path          path
+        :self-template (str path "/{" (name (or id :id)) "}")
+        :profile-path  (str "/profile/" (name collection))
+        :search-path   (str path "/search")
+        :projections   (into {} (map normalise-projection) (:projections spec))
+        :searches      (into {} (map (partial normalise-search path)) (:searches spec))
         :table       (or (:table spec) collection)
         :identity    id
         :fields      fields
@@ -114,6 +145,21 @@
            [r spec'] (:relations spec)
            :when (not (contains? names (:target spec')))]
        {:path [:resources k :relations r] :error :unknown-target :detail (:target spec')})
+     (for [[k spec] resources
+           [p projection] (:projections spec)
+           f (:fields projection)
+           :when (not (contains? (:fields spec) f))]
+       {:path [:resources k :projections p] :error :unknown-field :detail f})
+     (for [[k spec] resources
+           [p projection] (:projections spec)
+           r (:embed projection)
+           :when (not (contains? (:relations spec) r))]
+       {:path [:resources k :projections p] :error :unknown-relation :detail r})
+     (for [[k spec] resources
+           [s search] (:searches spec)
+           f (:predicates search)
+           :when (not (contains? (:fields spec) f))]
+       {:path [:resources k :searches s] :error :unknown-field :detail f})
      (for [[k spec] resources
            [f spec'] (:fields spec)
            :when (and (:generated spec')

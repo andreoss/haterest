@@ -5,13 +5,31 @@
   (keyword (str (name (:target relation)) "-key")))
 
 (defn member-template [relation]
-  (str (:path relation) "/{" (name (member-variable relation)) "}"))
+  (or (:member-template relation)
+      (str (:path relation) "/{" (name (member-variable relation)) "}")))
 
 (defn- item-template [resource]
   (str (:path resource) "/{" (name (:identity resource)) "}"))
 
+(defn- search-routes [resource]
+  (when (seq (:searches resource))
+    (into [[(uri/route-path (:search-path resource))
+            {:name                (keyword "hypermedia.route" (str (name (:name resource)) ".searches"))
+             :hypermedia/resource (:name resource)
+             :hypermedia/op       :search-index
+             :hypermedia/template (:search-path resource)}]]
+          (for [[k search] (:searches resource)]
+            [(uri/route-path (:path search))
+             {:name                (keyword "hypermedia.route"
+                                            (str (name (:name resource)) ".search." (name k)))
+              :hypermedia/resource (:name resource)
+              :hypermedia/op       :search
+              :hypermedia/search   search
+              :hypermedia/template (:path search)}]))))
+
 (defn- resource-routes [resource]
-  (into [[(uri/route-path (:path resource))
+  (into (into [] (search-routes resource))
+        (into [[(uri/route-path (:path resource))
           {:name                (keyword "hypermedia.route" (str (name (:name resource)) ".collection"))
            :hypermedia/resource (:name resource)
            :hypermedia/op       :collection
@@ -38,7 +56,7 @@
                      :hypermedia/op       :association-member
                      :hypermedia/relation relation
                      :hypermedia/template (member-template relation)}])))
-         (:relations resource))))
+         (:relations resource)))))
 
 (defn routes [model]
   (into [["/" {:name                :hypermedia.route/root

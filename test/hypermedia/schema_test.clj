@@ -144,3 +144,44 @@
   (let [model (schema/parse (assoc-in config [:resources :book :relations :author :embed] true))]
     (is (true? (get-in model [:resources :book :relations :author :embed?])))
     (is (false? (get-in model [:resources :author :relations :books :embed?])))))
+
+(def described
+  {:resources
+   {:author {:fields {:id {:type :long :identity true} :name {:type :string}}}
+    :book   {:fields      {:id        {:type :long :identity true}
+                           :title     {:type :string}
+                           :year      {:type :long}
+                           :author-id {:type :long}}
+             :relations   {:author {:kind :belongs-to :target :author :via :author-id}}
+             :projections {:summary {:fields [:title]}
+                           :full    {:fields [:title :year] :embed [:author]}}
+             :searches    {:by-title {:predicates [:title]}
+                           :by-year  {:predicates [:year]}}}}})
+
+(deftest carries-templates-for-what-it-addresses
+  (let [book (get-in (schema/parse described) [:resources :book])]
+    (is (= "/books/{id}" (:self-template book)))
+    (is (= "/profile/books" (:profile-path book)))
+    (is (= "/books/search" (:search-path book)))))
+
+(deftest carries-a-member-template-for-a-has-many-relation
+  (let [model (schema/parse config)]
+    (is (= "/authors/{id}/books/{book-key}"
+           (get-in model [:resources :author :relations :books :member-template])))
+    (is (nil? (get-in model [:resources :book :relations :author :member-template])))))
+
+(deftest normalises-projections-and-searches
+  (let [book (get-in (schema/parse described) [:resources :book])]
+    (is (= [:title] (get-in book [:projections :summary :fields])))
+    (is (= [:author] (get-in book [:projections :full :embed])))
+    (is (= "/books/search/by-title" (get-in book [:searches :by-title :path])))
+    (is (= "/books/search/by-title{?title,page,size,sort}"
+           (get-in book [:searches :by-title :template])))))
+
+(deftest rejects-a-projection-or-search-it-cannot-honour
+  (is (thrown? clojure.lang.ExceptionInfo
+               (schema/parse (assoc-in described [:resources :book :projections :summary :fields] [:nope]))))
+  (is (thrown? clojure.lang.ExceptionInfo
+               (schema/parse (assoc-in described [:resources :book :projections :summary :embed] [:nope]))))
+  (is (thrown? clojure.lang.ExceptionInfo
+               (schema/parse (assoc-in described [:resources :book :searches :by-title :predicates] [:nope])))))
