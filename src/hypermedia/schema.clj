@@ -10,7 +10,9 @@
 (def field-types
   #{:uuid :string :text :long :double :decimal :boolean :instant :date})
 
-(def relation-kinds #{:belongs-to :has-one :has-many})
+(def relation-kinds #{:belongs-to :has-one :has-many :many-to-many})
+
+(def set-kinds #{:has-many :many-to-many})
 
 (def Field
   [:map
@@ -25,7 +27,9 @@
    [:kind :keyword]
    [:embed {:optional true} :boolean]
    [:target :keyword]
-   [:via :keyword]])
+   [:via :keyword]
+   [:through {:optional true} :keyword]
+   [:target-via {:optional true} :keyword]])
 
 (def Projection
   [:map
@@ -83,8 +87,12 @@
     [k (-> spec
            (assoc :name k
                   :path self
-                  :member-template (when (= :has-many (:kind spec))
+                  :member-template (when (contains? set-kinds (:kind spec))
                                      (str self "/{" (name (:target spec)) "-key}"))
+                  :join (when (= :many-to-many (:kind spec))
+                          {:table             (:through spec)
+                           :via-column        (column (:via spec))
+                           :target-via-column (column (:target-via spec))})
                   :embed? (boolean (:embed spec))
                   :rel k)
            (dissoc :embed))]))
@@ -145,6 +153,38 @@
            [r spec'] (:relations spec)
            :when (not (contains? names (:target spec')))]
        {:path [:resources k :relations r] :error :unknown-target :detail (:target spec')})
+     (for [[k spec] resources
+           [r relation] (:relations spec)
+           :when (and (= :many-to-many (:kind relation))
+                      (or (nil? (:through relation)) (nil? (:target-via relation))))]
+       {:path [:resources k :relations r] :error :join-not-declared})
+     (for [[k spec] resources
+           [r relation] (:relations spec)
+           :when (and (not= :many-to-many (:kind relation)) (:through relation))]
+       {:path [:resources k :relations r] :error :join-not-allowed})
+     (for [[k spec] resources
+           [r relation] (:relations spec)
+           :when (and (= :many-to-many (:kind relation))
+                      (= (:via relation) (:target-via relation)))]
+       {:path [:resources k :relations r] :error :join-columns-clash})
+     (let [tables (into #{} (map (fn [[k spec]] (or (:table spec) (:collection spec) (plural k))))
+                        resources)]
+       (for [[k spec] resources
+             [r relation] (:relations spec)
+             :when (and (= :many-to-many (:kind relation))
+                        (contains? tables (:through relation)))]
+         {:path [:resources k :relations r] :error :join-table-taken}))
+     (for [[k spec] resources
+           [r relation] (:relations spec)
+           :when (and (contains? #{:belongs-to :has-one} (:kind relation))
+                      (not (contains? (:fields spec) (:via relation))))]
+       {:path [:resources k :relations r] :error :via-not-a-field})
+     (for [[k spec] resources
+           [r relation] (:relations spec)
+           :when (and (= :has-many (:kind relation))
+                      (contains? resources (:target relation))
+                      (not (contains? (:fields (get resources (:target relation))) (:via relation))))]
+       {:path [:resources k :relations r] :error :via-not-a-field-of-the-target})
      (for [[k spec] resources
            [p projection] (:projections spec)
            f (:fields projection)

@@ -8,7 +8,8 @@
    {:resources
     {:author {:fields    {:id {:type :uuid :identity true} :name {:type :string}}
               :relations {:books {:kind :has-many :target :book :via :author-id}}}
-     :book   {:fields    {:id {:type :uuid :identity true} :title {:type :string}}
+     :book   {:fields    {:id {:type :uuid :identity true} :title {:type :string}
+                          :author-id {:type :uuid}}
               :relations {:author {:kind :belongs-to :target :author :via :author-id}}}}}))
 
 (defn- paths [routes] (mapv first routes))

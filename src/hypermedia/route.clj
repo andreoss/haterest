@@ -48,7 +48,7 @@
                       :hypermedia/op       :association
                       :hypermedia/relation relation
                       :hypermedia/template (:path relation)}]]
-             (= :has-many (:kind relation))
+             (contains? #{:has-many :many-to-many} (:kind relation))
              (conj [(uri/route-path (member-template relation))
                     {:name                (keyword "hypermedia.route"
                                                    (str (name (:name resource)) ".member." (name k)))
