@@ -1,9 +1,15 @@
-{:resources
+{:curie "rel"
+ :resources
  {:author {:fields    {:id   {:type :uuid :identity true :generated true}
                        :name {:type :string :required true}}
-           :relations {:books {:kind :has-many :target :book :via :author-id}}}
-  :book   {:fields    {:id        {:type :uuid :identity true :generated true}
-                       :title     {:type :string :required true}
-                       :year      {:type :long}
-                       :author-id {:type :uuid}}
-           :relations {:author {:kind :belongs-to :target :author :via :author-id :embed true}}}}}
+           :relations {:books {:kind :has-many :target :book :via :author-id}}
+           :searches  {:by-name {:predicates [:name]}}}
+  :book   {:fields      {:id        {:type :uuid :identity true :generated true}
+                         :title     {:type :string :required true}
+                         :year      {:type :long}
+                         :author-id {:type :uuid}}
+           :relations   {:author {:kind :belongs-to :target :author :via :author-id :embed true}}
+           :projections {:summary {:fields [:title]}
+                         :full    {:fields [:title :year] :embed [:author]}}
+           :searches    {:by-title {:predicates [:title]}
+                         :by-year  {:predicates [:year]}}}}}
