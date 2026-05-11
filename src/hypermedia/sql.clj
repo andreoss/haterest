@@ -41,7 +41,7 @@
 (defn quoted [identifier]
   (str \" (str/replace (name identifier) \" \_) \"))
 
-(defn- columns-of [resource]
+(defn columns-of [resource]
   (mapv #(get-in resource [:fields % :column]) (:field-order resource)))
 
 (defn- column-clause [dialect resource field]
@@ -83,8 +83,11 @@
     (str "CREATE TABLE IF NOT EXISTS " (quoted (:table resource))
          " (" (str/join ", " parts) ")")))
 
+(declare join-tables)
+
 (defn ddl [model dialect]
-  (mapv #(create-table model dialect (get-in model [:resources %])) (creation-order model)))
+  (into (mapv #(create-table model dialect (get-in model [:resources %])) (creation-order model))
+        (join-tables model dialect)))
 
 (defn projection [resource]
   (str "SELECT " (str/join ", " (map quoted (columns-of resource)))
@@ -100,13 +103,15 @@
                                      :resource (:name resource)
                                      :fields (vec unknown)}))))
 
-(defn- order-clause [resource order]
-  (when (seq order)
-    (check-fields resource (map first order))
-    (str " ORDER BY "
-         (str/join ", " (for [[field direction] order]
-                          (str (quoted (get-in resource [:fields field :column]))
-                               (if (= :desc direction) " DESC" " ASC")))))))
+(defn- order-clause
+  ([resource order] (order-clause resource order ""))
+  ([resource order prefix]
+   (when (seq order)
+     (check-fields resource (map first order))
+     (str " ORDER BY "
+          (str/join ", " (for [[field direction] order]
+                           (str prefix (quoted (get-in resource [:fields field :column]))
+                                (if (= :desc direction) " DESC" " ASC"))))))))
 
 (defn- values-of [value]
   (if (coll? value) (vec (sort-by str value)) [value]))
@@ -202,3 +207,75 @@
               :by-identity  (select-by-identity resource)
               :delete       (first (delete-by-identity resource nil))
               :count        (first (count-of resource {}))}])))
+
+(defn join-tables [model dialect]
+  (->> (for [k (:order model)
+             :let [owner (get-in model [:resources k])]
+             [_ relation] (:relations owner)
+             :when (= :many-to-many (:kind relation))
+             :let [join   (:join relation)
+                   target (get-in model [:resources (:target relation)])]]
+         [(:table join)
+          (str "CREATE TABLE IF NOT EXISTS " (quoted (:table join))
+               " (" (quoted (:via-column join)) " "
+               (column-type dialect (get-in owner [:fields (:identity owner) :type])) " NOT NULL, "
+               (quoted (:target-via-column join)) " "
+               (column-type dialect (get-in target [:fields (:identity target) :type])) " NOT NULL, "
+               "PRIMARY KEY (" (quoted (:via-column join)) ", " (quoted (:target-via-column join)) "), "
+               "FOREIGN KEY (" (quoted (:via-column join)) ") REFERENCES " (quoted (:table owner))
+               " (" (quoted (get-in owner [:fields (:identity owner) :column])) "), "
+               "FOREIGN KEY (" (quoted (:target-via-column join)) ") REFERENCES " (quoted (:table target))
+               " (" (quoted (get-in target [:fields (:identity target) :column])) "))")])
+       (reduce (fn [m [table statement]] (if (contains? m table) m (assoc m table statement)))
+               {})
+       vals
+       vec))
+
+(defn- linked-source [target relation]
+  (let [join (:join relation)]
+    (str " FROM " (quoted (:table target)) " t"
+         " JOIN " (quoted (:table join)) " j"
+         " ON j." (quoted (:target-via-column join))
+         " = t." (quoted (get-in target [:fields (:identity target) :column]))
+         " WHERE j." (quoted (:via-column join)) " = ?")))
+
+(defn select-linked [target relation owner-id {:keys [order limit offset]}]
+  (into [(str "SELECT " (str/join ", " (map #(str "t." (quoted %)) (columns-of target)))
+              (linked-source target relation)
+              (order-clause target order "t.")
+              (when limit " LIMIT ?")
+              (when offset " OFFSET ?"))]
+        (concat [owner-id] (when limit [limit]) (when offset [offset]))))
+
+(defn count-linked [target relation owner-id]
+  [(str "SELECT COUNT(*) AS \"total\"" (linked-source target relation)) owner-id])
+
+(defn select-join [relation owner-ids]
+  (let [join (:join relation)
+        ids  (vec (sort-by str owner-ids))]
+    (into [(str "SELECT " (quoted (:via-column join)) ", " (quoted (:target-via-column join))
+                " FROM " (quoted (:table join))
+                (if (seq ids)
+                  (str " WHERE " (quoted (:via-column join))
+                       " IN (" (str/join ", " (repeat (count ids) "?")) ")")
+                  " WHERE 1 = 0"))]
+          ids)))
+
+(defn insert-join [relation owner-id target-id]
+  (let [join (:join relation)]
+    [(str "INSERT INTO " (quoted (:table join))
+          " (" (quoted (:via-column join)) ", " (quoted (:target-via-column join)) ")"
+          " VALUES (?, ?)")
+     owner-id target-id]))
+
+(defn delete-join [relation owner-id target-ids]
+  (let [join (:join relation)
+        ids  (when target-ids (vec (sort-by str target-ids)))]
+    (into [(str "DELETE FROM " (quoted (:table join))
+                " WHERE " (quoted (:via-column join)) " = ?"
+                (when ids
+                  (if (seq ids)
+                    (str " AND " (quoted (:target-via-column join))
+                         " IN (" (str/join ", " (repeat (count ids) "?")) ")")
+                    " AND 1 = 0")))]
+          (cons owner-id ids))))

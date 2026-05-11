@@ -1,5 +1,6 @@
 (ns hypermedia.store.jdbc
-  (:require [hypermedia.sql :as sql]
+  (:require [clojure.string :as str]
+            [hypermedia.sql :as sql]
             [hypermedia.store :as store]
             [next.jdbc :as jdbc]
             [next.jdbc.connection :as connection]
@@ -74,7 +75,44 @@
       false))
   (transact [this body]
     (jdbc/with-transaction [tx datasource]
-      (body (assoc this :datasource tx)))))
+      (body (assoc this :datasource tx))))
+  (linked [_ owner target relation owner-id criteria]
+    (mapv #(decode-row dialect target %)
+          (jdbc/execute! datasource
+                         (sql/select-linked target relation
+                                            (sql/encode dialect (type-of owner (:identity owner)) owner-id)
+                                            criteria)
+                         options)))
+  (linked-total [_ owner target relation owner-id]
+    (:total (jdbc/execute-one! datasource
+                               (sql/count-linked target relation
+                                                 (sql/encode dialect (type-of owner (:identity owner)) owner-id))
+                               options)))
+  (links-of [_ owner target relation owner-ids]
+    (let [join       (:join relation)
+          owner-key  (keyword (str/replace (name (:via-column join)) \_ \-))
+          target-key (keyword (str/replace (name (:target-via-column join)) \_ \-))
+          owner-type (type-of owner (:identity owner))
+          other-type (type-of target (:identity target))]
+      (mapv (fn [row] [(sql/decode dialect owner-type (get row owner-key))
+                       (sql/decode dialect other-type (get row target-key))])
+            (jdbc/execute! datasource
+                           (sql/select-join relation (map #(sql/encode dialect owner-type %) owner-ids))
+                           options))))
+  (link! [_ owner target relation owner-id target-ids]
+    (let [key (sql/encode dialect (type-of owner (:identity owner)) owner-id)]
+      (doseq [target-id target-ids]
+        (jdbc/execute! datasource
+                       (sql/insert-join relation key
+                                        (sql/encode dialect (type-of target (:identity target)) target-id))))
+      (count target-ids)))
+  (unlink! [_ owner target relation owner-id target-ids]
+    (let [key (sql/encode dialect (type-of owner (:identity owner)) owner-id)
+          ids (when target-ids
+                (map #(sql/encode dialect (type-of target (:identity target)) %) target-ids))]
+      (or (:next.jdbc/update-count
+           (first (jdbc/execute! datasource (sql/delete-join relation key ids))))
+          0))))
 
 (defn migrate! [datasource model dialect]
   (run! #(jdbc/execute! datasource [%]) (sql/ddl model dialect)))

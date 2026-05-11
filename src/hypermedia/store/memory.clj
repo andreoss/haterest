@@ -28,6 +28,14 @@
                                      :resource (:name resource)
                                      :fields (vec unknown)}))))
 
+(defn- rows-of [state relation]
+  (get @state (get-in relation [:join :table]) #{}))
+
+(defn- pairs [state relation]
+  (let [join (:join relation)]
+    (map (fn [row] [(get row (:via-column join)) (get row (:target-via-column join))])
+         (rows-of state relation))))
+
 (defrecord Memory [state]
   store/Store
   (fetch [_ resource id]
@@ -62,7 +70,32 @@
     (if (store/fetch this resource id)
       (do (swap! state update (:name resource) dissoc id) true)
       false))
-  (transact [this body] (locking state (body this))))
+  (transact [this body] (locking state (body this)))
+  (linked [this _ target relation owner-id criteria]
+    (let [ids (into #{} (keep (fn [[o t]] (when (= o owner-id) t))) (pairs state relation))]
+      (if (seq ids)
+        (store/query this target (assoc criteria :where {(:identity target) ids}))
+        [])))
+  (linked-total [this _ target relation owner-id]
+    (count (filter (fn [[o t]] (and (= o owner-id) (some? (store/fetch this target t))))
+                   (pairs state relation))))
+  (links-of [_ _owner _target relation owner-ids]
+    (let [wanted (set owner-ids)]
+      (vec (sort-by str (filter (fn [[o _]] (contains? wanted o)) (pairs state relation))))))
+  (link! [_ _owner _target relation owner-id target-ids]
+    (let [join (:join relation)]
+      (swap! state update (:table join) (fnil into #{})
+             (map (fn [t] {(:via-column join) owner-id (:target-via-column join) t}) target-ids))
+      (count target-ids)))
+  (unlink! [_ _owner _target relation owner-id target-ids]
+    (let [join   (:join relation)
+          doomed (when target-ids (set target-ids))
+          gone   (filter (fn [row] (and (= owner-id (get row (:via-column join)))
+                                        (or (nil? doomed)
+                                            (contains? doomed (get row (:target-via-column join))))))
+                         (rows-of state relation))]
+      (swap! state update (:table join) (fnil (partial reduce disj) #{}) gone)
+      (count gone))))
 
 (defn store [data]
   (->Memory (atom data)))
