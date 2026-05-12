@@ -185,3 +185,22 @@
                (schema/parse (assoc-in described [:resources :book :projections :summary :embed] [:nope]))))
   (is (thrown? clojure.lang.ExceptionInfo
                (schema/parse (assoc-in described [:resources :book :searches :by-title :predicates] [:nope])))))
+
+(def truthy
+  (get-in (schema/parse
+           {:resources {:flag {:fields {:id   {:type :long :identity true}
+                                        :done {:type :boolean}
+                                        :size {:type :long}}}}})
+          [:resources :flag]))
+
+(deftest a-false-value-is-a-value
+  (let [{:keys [value errors]} (schema/conform truthy {:id 1 :done false :size 0} {})]
+    (is (empty? errors))
+    (is (false? (:done value)))
+    (is (= 0 (:size value)))))
+
+(deftest a-null-clears-a-field
+  (let [{:keys [value errors]} (schema/conform truthy {:done nil} {:partial? true})]
+    (is (empty? errors))
+    (is (contains? value :done))
+    (is (nil? (:done value)))))

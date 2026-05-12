@@ -250,9 +250,11 @@
         relation (get-in resource [:relations k])]
     (cond
       field
-      (if-let [coerced (coerce (:type field) value)]
-        {:entry [k coerced]}
-        (if (nil? value) {:entry [k nil]} {:error {:field k :error :unreadable}}))
+      (let [coerced (coerce (:type field) value)]
+        (cond
+          (some? coerced) {:entry [k coerced]}
+          (nil? value)    {:entry [k nil]}
+          :else           {:error {:field k :error :unreadable}}))
 
       (= :belongs-to (:kind relation))
       (let [target  (get-in resource [:fields (:via relation)])
