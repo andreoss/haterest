@@ -1,5 +1,6 @@
 (ns hypermedia.sql
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str])
+  (:import (java.time Instant LocalDate LocalDateTime ZoneOffset)))
 
 (def ansi-types
   {:long    "BIGINT"
@@ -15,6 +16,9 @@
 (def dialect-types
   {:ansi     ansi-types
    :h2       (assoc ansi-types :uuid "UUID" :instant "TIMESTAMP WITH TIME ZONE")
+   :hsqldb   (assoc ansi-types :uuid "UUID" :instant "TIMESTAMP WITH TIME ZONE")
+   :derby    (assoc ansi-types :double "DOUBLE")
+   :mysql    (assoc ansi-types :text "TEXT" :instant "DATETIME")
    :postgres (assoc ansi-types :uuid "UUID" :text "TEXT" :instant "TIMESTAMP WITH TIME ZONE")
    :sqlite   {:long    "INTEGER"
               :string  "TEXT"
@@ -31,7 +35,27 @@
     "jdbc:h2:"         :h2
     "jdbc:sqlite:"     :sqlite
     "jdbc:postgresql:" :postgres
+    "jdbc:hsqldb:"     :hsqldb
+    "jdbc:derby:"      :derby
+    "jdbc:mysql:"      :mysql
+    "jdbc:mariadb:"    :mysql
     :ansi))
+
+(def ^:private without-if-not-exists #{:derby})
+
+(defn creates-only-once? [dialect]
+  (contains? without-if-not-exists dialect))
+
+(defn session-setup [dialect]
+  (when (= :mysql dialect) "SET SESSION sql_mode='ANSI_QUOTES'"))
+
+(defn- fetch-clause [dialect limit offset]
+  (if (= :derby dialect)
+    {:sql    (str (when offset " OFFSET ? ROWS")
+                  (when limit " FETCH NEXT ? ROWS ONLY"))
+     :params (into (if offset [offset] []) (if limit [limit] []))}
+    {:sql    (str (when limit " LIMIT ?") (when offset " OFFSET ?"))
+     :params (into (if limit [limit] []) (if offset [offset] []))}))
 
 (defn column-type [dialect type]
   (or (get-in dialect-types [dialect type])
@@ -80,7 +104,8 @@
         parts (concat (map #(column-clause dialect resource %) (:field-order resource))
                       [(str "PRIMARY KEY (" identity-column ")")]
                       (foreign-keys model resource))]
-    (str "CREATE TABLE IF NOT EXISTS " (quoted (:table resource))
+    (str "CREATE TABLE " (when-not (creates-only-once? dialect) "IF NOT EXISTS ")
+         (quoted (:table resource))
          " (" (str/join ", " parts) ")")))
 
 (declare join-tables)
@@ -130,15 +155,17 @@
     {:sql    (when (seq parts) (str " WHERE " (str/join " AND " (map :sql parts))))
      :params (vec (mapcat :params parts))}))
 
-(defn select [resource {:keys [where order limit offset]}]
-  (check-fields resource (keys where))
-  (let [clause (where-clause resource where)]
-    (into [(str (projection resource)
-                (:sql clause)
-                (order-clause resource order)
-                (when limit " LIMIT ?")
-                (when offset " OFFSET ?"))]
-          (concat (:params clause) (when limit [limit]) (when offset [offset])))))
+(defn select
+  ([resource criteria] (select :ansi resource criteria))
+  ([dialect resource {:keys [where order limit offset]}]
+   (check-fields resource (keys where))
+   (let [clause (where-clause resource where)
+         fetch  (fetch-clause dialect limit offset)]
+     (into [(str (projection resource)
+                 (:sql clause)
+                 (order-clause resource order)
+                 (:sql fetch))]
+           (concat (:params clause) (:params fetch))))))
 
 (defn count-of [resource {:keys [where]}]
   (check-fields resource (keys where))
@@ -170,8 +197,22 @@
         " WHERE " (quoted (get-in resource [:fields (:identity resource) :column])) " = ?")
    id])
 
-(def ^:private encoders
-  {:sqlite {:uuid str :boolean #(if % 1 0) :instant str :date str}})
+(defn- stored-as [dialect type]
+  (column-type dialect type))
+
+(defn- textual? [dialect type]
+  (let [storage (stored-as dialect type)]
+    (or (str/starts-with? storage "TEXT")
+        (str/starts-with? storage "VARCHAR")
+        (str/starts-with? storage "CLOB")
+        (str/starts-with? storage "CHAR"))))
+
+(defn- numeric? [dialect type]
+  (let [storage (stored-as dialect type)]
+    (or (str/starts-with? storage "INT")
+        (str/starts-with? storage "BIGINT")
+        (str/starts-with? storage "NUMERIC")
+        (str/starts-with? storage "SMALLINT"))))
 
 (def ^:private readers
   {:uuid    (fn [v] (if (uuid? v) v (java.util.UUID/fromString (str v))))
@@ -181,18 +222,42 @@
    :instant (fn [v] (condp instance? v
                       java.time.Instant        v
                       java.time.OffsetDateTime (.toInstant ^java.time.OffsetDateTime v)
-                      java.sql.Timestamp       (.toInstant ^java.sql.Timestamp v)
+                      java.sql.Timestamp       (.toInstant (.atOffset (.toLocalDateTime ^java.sql.Timestamp v)
+                                                            ZoneOffset/UTC))
                       (java.time.Instant/parse (str v))))
    :date    (fn [v] (condp instance? v
                       java.time.LocalDate v
                       java.sql.Date       (.toLocalDate ^java.sql.Date v)
                       (java.time.LocalDate/parse (str v))))
-   :decimal (fn [v] (bigdec v))})
+   :decimal (fn [v] (bigdec v))
+   :text    (fn [v] (if (instance? java.sql.Clob v)
+                      (.getSubString ^java.sql.Clob v 1 (int (.length ^java.sql.Clob v)))
+                      (str v)))
+   :string  (fn [v] (if (instance? java.sql.Clob v)
+                      (.getSubString ^java.sql.Clob v 1 (int (.length ^java.sql.Clob v)))
+                      v))})
 
 (defn encode [dialect type value]
-  (if-let [f (and (some? value) (get-in encoders [dialect type]))]
-    (f value)
-    value))
+  (cond
+    (nil? value)  value
+    (coll? value) (mapv #(encode dialect type %) value)
+    :else
+    (case type
+      :uuid    (if (textual? dialect :uuid) (str value) value)
+      :boolean (cond (numeric? dialect :boolean) (if value 1 0)
+                     (textual? dialect :boolean) (str (boolean value))
+                     :else value)
+      :instant (cond
+                 (textual? dialect :instant)      (str value)
+                 (not (instance? Instant value))  value
+                 (str/includes? (stored-as dialect :instant) "WITH TIME ZONE")
+                 (.atOffset ^Instant value ZoneOffset/UTC)
+                 :else (java.sql.Timestamp/valueOf (LocalDateTime/ofInstant ^Instant value ZoneOffset/UTC)))
+      :date    (cond
+                 (textual? dialect :date)           (str value)
+                 (instance? LocalDate value)        (java.sql.Date/valueOf ^LocalDate value)
+                 :else                              value)
+      value)))
 
 (defn decode [_ type value]
   (if-let [f (and (some? value) (get readers type))]
@@ -216,7 +281,8 @@
              :let [join   (:join relation)
                    target (get-in model [:resources (:target relation)])]]
          [(:table join)
-          (str "CREATE TABLE IF NOT EXISTS " (quoted (:table join))
+          (str "CREATE TABLE " (when-not (creates-only-once? dialect) "IF NOT EXISTS ")
+               (quoted (:table join))
                " (" (quoted (:via-column join)) " "
                (column-type dialect (get-in owner [:fields (:identity owner) :type])) " NOT NULL, "
                (quoted (:target-via-column join)) " "
@@ -239,13 +305,15 @@
          " = t." (quoted (get-in target [:fields (:identity target) :column]))
          " WHERE j." (quoted (:via-column join)) " = ?")))
 
-(defn select-linked [target relation owner-id {:keys [order limit offset]}]
-  (into [(str "SELECT " (str/join ", " (map #(str "t." (quoted %)) (columns-of target)))
-              (linked-source target relation)
-              (order-clause target order "t.")
-              (when limit " LIMIT ?")
-              (when offset " OFFSET ?"))]
-        (concat [owner-id] (when limit [limit]) (when offset [offset]))))
+(defn select-linked
+  ([target relation owner-id criteria] (select-linked :ansi target relation owner-id criteria))
+  ([dialect target relation owner-id {:keys [order limit offset]}]
+   (let [fetch (fetch-clause dialect limit offset)]
+     (into [(str "SELECT " (str/join ", " (map #(str "t." (quoted %)) (columns-of target)))
+                 (linked-source target relation)
+                 (order-clause target order "t.")
+                 (:sql fetch))]
+           (concat [owner-id] (:params fetch))))))
 
 (defn count-linked [target relation owner-id]
   [(str "SELECT COUNT(*) AS \"total\"" (linked-source target relation)) owner-id])

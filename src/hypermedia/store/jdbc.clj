@@ -9,6 +9,13 @@
 
 (def ^:private options {:builder-fn rs/as-unqualified-kebab-maps})
 
+(extend-protocol rs/ReadableColumn
+  java.sql.Clob
+  (read-column-by-label [value _]
+    (.getSubString ^java.sql.Clob value 1 (int (.length ^java.sql.Clob value))))
+  (read-column-by-index [value _ _]
+    (.getSubString ^java.sql.Clob value 1 (int (.length ^java.sql.Clob value)))))
+
 (defn- type-of [resource field]
   (get-in resource [:fields field :type]))
 
@@ -36,7 +43,9 @@
          (decode-row dialect resource)))
   (query [_ resource criteria]
     (mapv #(decode-row dialect resource %)
-          (jdbc/execute! datasource (sql/select resource (encode-criteria dialect resource criteria)) options)))
+          (jdbc/execute! datasource
+                         (sql/select dialect resource (encode-criteria dialect resource criteria))
+                         options)))
   (total [_ resource criteria]
     (:total (jdbc/execute-one! datasource
                                (sql/count-of resource (encode-criteria dialect resource criteria))
@@ -79,7 +88,7 @@
   (linked [_ owner target relation owner-id criteria]
     (mapv #(decode-row dialect target %)
           (jdbc/execute! datasource
-                         (sql/select-linked target relation
+                         (sql/select-linked dialect target relation
                                             (sql/encode dialect (type-of owner (:identity owner)) owner-id)
                                             criteria)
                          options)))
@@ -114,14 +123,25 @@
            (first (jdbc/execute! datasource (sql/delete-join relation key ids))))
           0))))
 
+(defn- already-there? [exception]
+  (let [text (str (.getMessage ^Exception exception))]
+    (or (str/includes? text "already exists")
+        (str/includes? text "X0Y32"))))
+
 (defn migrate! [datasource model dialect]
-  (run! #(jdbc/execute! datasource [%]) (sql/ddl model dialect)))
+  (doseq [statement (sql/ddl model dialect)]
+    (try (jdbc/execute! datasource [statement])
+         (catch Exception e
+           (when-not (and (sql/creates-only-once? dialect) (already-there? e))
+             (throw e))))))
 
 (defn open [{:keys [url model migrate? statements]}]
   (let [dialect    (sql/dialect url)
         datasource (connection/->pool HikariDataSource
                                       (cond-> {:jdbcUrl url}
-                                        (= :sqlite dialect) (assoc :maximumPoolSize 1)))]
+                                        (= :sqlite dialect) (assoc :maximumPoolSize 1)
+                                        (sql/session-setup dialect)
+                                        (assoc :connectionInitSql (sql/session-setup dialect))))]
     (when migrate? (migrate! datasource model dialect))
     (->Jdbc datasource model dialect (or statements (sql/statements model)))))
 

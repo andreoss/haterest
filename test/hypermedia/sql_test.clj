@@ -112,3 +112,20 @@
     (is (= "DELETE FROM \"books\" WHERE \"id\" = ?" (get-in compiled [:book :delete])))
     (is (= "SELECT COUNT(*) AS \"total\" FROM \"books\"" (get-in compiled [:book :count])))
     (is (every? string? (vals (:book compiled))))))
+
+(deftest encodes-a-set-element-by-element
+  (let [a (random-uuid) b (random-uuid)]
+    (is (= #{(str a) (str b)} (set (sql/encode :sqlite :uuid #{a b}))))
+    (is (= #{a b} (set (sql/encode :h2 :uuid #{a b}))))
+    (is (vector? (sql/encode :sqlite :uuid #{a b})))))
+
+(deftest encodes-for-the-column-the-dialect-uses
+  (let [id (random-uuid)]
+    (is (= (str id) (sql/encode :derby :uuid id)))
+    (is (= (str id) (sql/encode :mysql :uuid id)))
+    (is (= id (sql/encode :postgres :uuid id)))
+    (is (= id (sql/encode :hsqldb :uuid id)))))
+
+(deftest reads-a-large-object-as-a-value
+  (is (= "text" (sql/decode :h2 :text "text")))
+  (is (= "text" (sql/decode :h2 :string "text"))))
