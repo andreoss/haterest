@@ -117,7 +117,8 @@
         (for [relation (embedded-relations resource projection)
               :let [k      (:name relation)
                     target (get-in model [:resources (:target relation)])]]
-          [k (if (= :belongs-to (:kind relation))
+          [k (case (:kind relation)
+               :belongs-to
                (let [ids (into #{} (keep #(get % (:via relation))) rows)]
                  {:kind   :belongs-to
                   :target target
@@ -125,6 +126,25 @@
                             (into {} (map (juxt (:identity target) identity))
                                   (store/query store target {:where {(:identity target) ids}}))
                             {})})
+
+               :many-to-many
+               (let [owners (into #{} (keep #(get % (:identity resource))) rows)
+                     pairs  (if (seq owners)
+                              (store/links-of store resource target relation owners)
+                              [])
+                     found  (if (seq pairs)
+                              (into {} (map (juxt (:identity target) identity))
+                                    (store/query store target
+                                                 {:where {(:identity target) (into #{} (map second) pairs)}}))
+                              {})]
+                 {:kind   :has-many
+                  :target target
+                  :index  (reduce (fn [m [owner-id target-id]]
+                                    (if-let [found-row (get found target-id)]
+                                      (update m owner-id (fnil conj []) found-row)
+                                      m))
+                                  {} pairs)})
+
                (let [ids (into #{} (keep #(get % (:identity resource))) rows)]
                  {:kind   :has-many
                   :target target
@@ -247,7 +267,7 @@
       (str "&" (str/join "&" (for [[k v] kept] (str k "=" (uri/encode v)))))
       "")))
 
-(defn- sliced [model store resource base where request]
+(defn- sliced-by [model store resource base request rows-of total-of]
   (let [pageable (page/parse resource (:query-params request))
         {:keys [projection problem]} (projection-of resource request)]
     (cond
@@ -256,8 +276,8 @@
       (problem/of 400 "the slice cannot be read"
                   {:instance (:uri request) :errors (:errors pageable)})
       :else
-      (let [rows  (store/query store resource (page/criteria pageable where))
-            total (store/total store resource {:where where})
+      (let [rows  (rows-of pageable)
+            total (total-of)
             doc   (collection-doc model store resource rows base pageable total projection)
             extra (query-suffix request)]
         (document resource :collection
@@ -269,6 +289,17 @@
                                                          (update link :href str extra)
                                                          link)))
                                         {} %))))))))
+
+(defn- sliced [model store resource base where request]
+  (sliced-by model store resource base request
+             (fn [pageable] (store/query store resource (page/criteria pageable where)))
+             (fn [] (store/total store resource {:where where}))))
+
+(defn- sliced-through [model store owner target relation owner-id base request]
+  (sliced-by model store target base request
+             (fn [pageable] (store/linked store owner target relation owner-id
+                                          (dissoc (page/criteria pageable {}) :where)))
+             (fn [] (store/linked-total store owner target relation owner-id))))
 
 (defn- fresh? [request row]
   (etag/matches? (get-in request [:headers "if-none-match"]) (etag/of row)))
@@ -312,6 +343,8 @@
         self   (uri/expand (:path relation) {(:identity resource) id})]
     (cond
       (nil? row) (missing request)
+      (= :many-to-many (:kind relation))
+      (sliced-through model store resource target relation id self request)
       (= :has-many (:kind relation)) (sliced model store target self {(:via relation) id} request)
       :else (if-let [linked (some->> (get row (:via relation)) (store/fetch store target))]
               (item-response model store target linked request)
@@ -395,18 +428,32 @@
                                   (fn [tx] (store/amend! tx resource id {(:via relation) (first ids)})))
                   no-content))
 
+      (not (every? #(some? (store/fetch store target %)) ids))
+      (problem/of 422 "the referenced resource does not exist" {:instance (:uri request)})
+
+      (= :many-to-many (:kind relation))
+      (do (store/transact
+           store
+           (fn [tx]
+             (when (= :put (:request-method request))
+               (store/unlink! tx resource target relation id nil))
+             (store/link! tx resource target relation id
+                          (remove (fn [target-id]
+                                    (some #(= target-id (second %))
+                                          (store/links-of tx resource target relation [id])))
+                                  ids))))
+          no-content)
+
       :else
-      (if-not (every? #(some? (store/fetch store target %)) ids)
-        (problem/of 422 "the referenced resource does not exist" {:instance (:uri request)})
-        (do (store/transact
-             store
-             (fn [tx]
-               (when (= :put (:request-method request))
-                 (doseq [row   (store/query tx target {:where {(:via relation) id}})
-                         :when (not (contains? (set ids) (get row (:identity target))))]
-                   (store/amend! tx target (get row (:identity target)) {(:via relation) nil})))
-               (bind-one tx target ids id (:via relation))))
-            no-content)))))
+      (do (store/transact
+           store
+           (fn [tx]
+             (when (= :put (:request-method request))
+               (doseq [row   (store/query tx target {:where {(:via relation) id}})
+                       :when (not (contains? (set ids) (get row (:identity target))))]
+                 (store/amend! tx target (get row (:identity target)) {(:via relation) nil})))
+             (bind-one tx target ids id (:via relation))))
+          no-content))))
 
 (defn- handle-unbind [model store resource relation request]
   (let [id    (identity-of resource request)
@@ -426,10 +473,19 @@
                           (schema/coerce (get-in target [:fields (:identity target) :type])))
         owner    (some->> id (store/fetch store resource))
         referent (some->> member (store/fetch store target))]
-    (if (and owner referent (= id (get referent (:via relation))))
+    (cond
+      (not (and owner referent)) (missing request)
+
+      (= :many-to-many (:kind relation))
+      (if (pos? (store/transact store (fn [tx] (store/unlink! tx resource target relation id [member]))))
+        no-content
+        (missing request))
+
+      (= id (get referent (:via relation)))
       (do (store/transact store (fn [tx] (store/amend! tx target member {(:via relation) nil})))
           no-content)
-      (missing request))))
+
+      :else (missing request))))
 
 (defn- endpoints [model store data]
   (let [resource (get-in model [:resources (:hypermedia/resource data)])
@@ -449,7 +505,7 @@
                              :put (partial handle-bind model store resource relation)}
                       (= :belongs-to (:kind relation))
                       (assoc :delete (partial handle-unbind model store resource relation))
-                      (= :has-many (:kind relation))
+                      (contains? #{:has-many :many-to-many} (:kind relation))
                       (assoc :post (partial handle-bind model store resource relation)))
       :association-member {:delete (partial handle-unbind-member model store resource relation)})))
 
