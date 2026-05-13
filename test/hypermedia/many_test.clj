@@ -137,3 +137,8 @@
 (def catalogue (config/api "catalogue.edn"))
 
 (defconformance catalogue catalogue (memory/store {:author {} :book {} :authorship #{}}))
+
+(deftest the-same-reference-twice-is-one-link
+  (let [{:keys [call]} (subject)]
+    (is (= 204 (:status (call :post "/authors/3/books" "/books/1\n/books/1" "text/uri-list"))))
+    (is (= 2 (get-in (call :get "/authors/3/books") [:body :page :totalElements])))))

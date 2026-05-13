@@ -73,7 +73,7 @@
   (let [body (:body (GET "/books/search/by-title?title=Dune"))]
     (is (= ["Dune"] (map :title (get-in body [:_embedded :books]))))
     (is (= 1 (get-in body [:page :totalElements])))
-    (is (= "/books/search/by-title?page=0&size=20" (get-in body [:_links :self :href])))))
+    (is (= "/books/search/by-title?page=0&size=20&title=Dune" (get-in body [:_links :self :href])))))
 
 (deftest a-search-without-a-predicate-answers-everything
   (is (= 3 (get-in (GET "/books/search/by-title") [:body :page :totalElements]))))
@@ -94,3 +94,31 @@
            (get-in (first (:descriptor (get by-id "get-book"))) [:doc :value])))
     (is (= ["title" "page" "size" "sort"]
            (map :name (:descriptor (get by-id "search-by-title")))))))
+
+(deftest a-search-keeps-its-predicates-in-its-links
+  (let [links (get-in (GET "/books/search/by-title?title=Dune&size=1") [:body :_links])]
+    (is (= "/books/search/by-title?page=0&size=1&title=Dune" (:href (:self links))))
+    (is (= "/books/search/by-title?page=0&size=1&title=Dune" (:href (:last links))))))
+
+(deftest a-search-is-walkable
+  (let [handler (api/handler demo
+                             (memory/store {:author {}
+                                            :book   {1 {:id 1 :title "Dune" :year 1965}
+                                                     2 {:id 2 :title "Dune" :year 1969}
+                                                     3 {:id 3 :title "Dune" :year 1976}
+                                                     4 {:id 4 :title "Emma" :year 1815}}}))
+        fetch   (fn [path]
+                  (let [[uri query] (string/split path #"\?" 2)]
+                    (-> (handler {:request-method :get :uri uri :query-string query})
+                        :body
+                        (json/read-value json/keyword-keys-object-mapper))))]
+    (loop [href "/books/search/by-title?title=Dune&size=2&sort=year,asc" seen [] guard 0]
+      (let [body (fetch href)
+            seen (into seen (map :year (get-in body [:_embedded :books])))]
+        (if-let [next (get-in body [:_links :next :href])]
+          (if (< guard 5) (recur next seen (inc guard)) (is false "the walk did not end"))
+          (is (= [1965 1969 1976] seen)))))))
+
+(deftest a-projection-survives-a-walk
+  (is (= "/books?page=1&size=1&sort=title%2Casc&projection=summary"
+         (get-in (GET "/books?size=1&sort=title,asc&projection=summary") [:body :_links :next :href]))))

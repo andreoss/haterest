@@ -252,7 +252,7 @@
                                 {:instance (:uri request)
                                  :errors   (vec (for [[href id] (map vector hrefs ids) :when (nil? id)]
                                                   {:field :uri :error :unreadable :detail href}))})}
-          {:ids ids})))))
+          {:ids (vec (distinct ids))})))))
 
 (defn- stale? [request row]
   (let [given (get-in request [:headers "if-match"])]
@@ -261,10 +261,14 @@
 (defn- precondition-failed [request]
   (problem/of 412 "the resource has moved on since it was read" {:instance (:uri request)}))
 
+(def ^:private slice-params #{"page" "size" "sort"})
+
 (defn- query-suffix [request]
-  (let [kept (select-keys (:query-params request) ["projection"])]
+  (let [kept (sort-by key (remove (fn [[k _]] (contains? slice-params k)) (:query-params request)))]
     (if (seq kept)
-      (str "&" (str/join "&" (for [[k v] kept] (str k "=" (uri/encode v)))))
+      (str "&" (str/join "&" (for [[k v] kept
+                                   one (if (sequential? v) v [v])]
+                               (str k "=" (uri/encode one)))))
       "")))
 
 (defn- sliced-by [model store resource base request rows-of total-of]
@@ -356,54 +360,62 @@
         (store/transact store
                         (fn [tx]
                           (let [stored (store/create! tx resource row)]
-                            (document resource :item (item-doc model resource stored) 201
+                            (document resource :item (single-doc model tx resource stored nil) 201
                                       {"Location" (uri/expand (:self-template resource)
                                                               {(:identity resource)
                                                                (get stored (:identity resource))})
                                        "ETag"     (etag/of stored)})))))))
 
 (defn- handle-replace [model store resource request]
-  (let [id      (identity-of resource request)
-        current (some->> id (store/fetch store resource))
+  (let [id (identity-of resource request)
         {:keys [row problem]} (submitted resource request {:identity id})]
     (cond
-      (nil? id)                              (missing request)
-      problem                                problem
-      (and current (stale? request current)) (precondition-failed request)
-      :else (store/transact
-             store
-             (fn [tx]
-               (let [{:keys [created? row]} (store/replace! tx resource id row)]
-                 (document resource :item (item-doc model resource row) (if created? 201 200)
-                           {"Location" (uri/expand (:self-template resource) {(:identity resource) id})
-                            "ETag"     (etag/of row)})))))))
+      (nil? id) (missing request)
+      problem   problem
+      :else
+      (store/transact
+       store
+       (fn [tx]
+         (let [current (store/fetch tx resource id)]
+           (if (and current (stale? request current))
+             (precondition-failed request)
+             (let [{:keys [created? row]} (store/replace! tx resource id row)]
+               (document resource :item (single-doc model tx resource row nil) (if created? 201 200)
+                         {"Location" (uri/expand (:self-template resource) {(:identity resource) id})
+                          "ETag"     (etag/of row)})))))))))
 
 (defn- handle-amend [model store resource request]
-  (let [id      (identity-of resource request)
-        current (some->> id (store/fetch store resource))
+  (let [id (identity-of resource request)
         {:keys [row problem]} (submitted resource request {:partial? true})]
     (cond
-      (nil? id)                (missing request)
-      problem                  problem
-      (nil? current)           (missing request)
-      (stale? request current) (precondition-failed request)
-      :else (store/transact
-             store
-             (fn [tx]
-               (if-let [stored (store/amend! tx resource id row)]
-                 (document resource :item (item-doc model resource stored) 200
-                           {"ETag" (etag/of stored)})
-                 (missing request)))))))
+      (nil? id) (missing request)
+      problem   problem
+      :else
+      (store/transact
+       store
+       (fn [tx]
+         (let [current (store/fetch tx resource id)]
+           (cond
+             (nil? current)           (missing request)
+             (stale? request current) (precondition-failed request)
+             :else (if-let [stored (store/amend! tx resource id row)]
+                     (document resource :item (single-doc model tx resource stored nil) 200
+                               {"ETag" (etag/of stored)})
+                     (missing request)))))))))
 
 (defn- handle-erase [store resource request]
-  (let [id      (identity-of resource request)
-        current (some->> id (store/fetch store resource))]
-    (cond
-      (nil? current)           (missing request)
-      (stale? request current) (precondition-failed request)
-      :else (if (store/transact store (fn [tx] (store/erase! tx resource id)))
-              no-content
-              (missing request)))))
+  (let [id (identity-of resource request)]
+    (if (nil? id)
+      (missing request)
+      (store/transact
+       store
+       (fn [tx]
+         (let [current (store/fetch tx resource id)]
+           (cond
+             (nil? current)           (missing request)
+             (stale? request current) (precondition-failed request)
+             (store/erase! tx resource id) no-content
+             :else                    (missing request))))))))
 
 (defn- bind-one [store target ids owner-id via]
   (doseq [id ids] (store/amend! store target id {via owner-id})))
@@ -423,10 +435,14 @@
         (problem/of 422 "this relation holds one resource" {:instance (:uri request)})
         (nil? (store/fetch store target (first ids)))
         (problem/of 422 "the referenced resource does not exist" {:instance (:uri request)})
-        (stale? request owner) (precondition-failed request)
-        :else (do (store/transact store
-                                  (fn [tx] (store/amend! tx resource id {(:via relation) (first ids)})))
-                  no-content))
+        :else (store/transact
+               store
+               (fn [tx]
+                 (let [current (store/fetch tx resource id)]
+                   (if (and current (stale? request current))
+                     (precondition-failed request)
+                     (do (store/amend! tx resource id {(:via relation) (first ids)})
+                         no-content))))))
 
       (not (every? #(some? (store/fetch store target %)) ids))
       (problem/of 422 "the referenced resource does not exist" {:instance (:uri request)})
@@ -437,11 +453,8 @@
            (fn [tx]
              (when (= :put (:request-method request))
                (store/unlink! tx resource target relation id nil))
-             (store/link! tx resource target relation id
-                          (remove (fn [target-id]
-                                    (some #(= target-id (second %))
-                                          (store/links-of tx resource target relation [id])))
-                                  ids))))
+             (let [already (into #{} (map second) (store/links-of tx resource target relation [id]))]
+               (store/link! tx resource target relation id (remove already ids)))))
           no-content)
 
       :else
@@ -456,15 +469,18 @@
           no-content))))
 
 (defn- handle-unbind [model store resource relation request]
-  (let [id    (identity-of resource request)
-        owner (some->> id (store/fetch store resource))]
-    (cond
-      (nil? owner)           (missing request)
-      (stale? request owner) (precondition-failed request)
-      (= :belongs-to (:kind relation))
-      (do (store/transact store (fn [tx] (store/amend! tx resource id {(:via relation) nil})))
-          no-content)
-      :else (missing request))))
+  (let [id (identity-of resource request)]
+    (store/transact
+     store
+     (fn [tx]
+       (let [owner (some->> id (store/fetch tx resource))]
+         (cond
+           (nil? owner)           (missing request)
+           (stale? request owner) (precondition-failed request)
+           (= :belongs-to (:kind relation))
+           (do (store/amend! tx resource id {(:via relation) nil})
+               no-content)
+           :else (missing request)))))))
 
 (defn- handle-unbind-member [model store resource relation request]
   (let [target   (get-in model [:resources (:target relation)])
@@ -573,6 +589,20 @@
                                   (allow-header (get-in request [:reitit.core/match :data]))))
     :not-acceptable     (fn [request] (problem/of 406 "not acceptable" {:instance (:uri request)}))}))
 
+(defn- report [request exception]
+  (binding [*out* *err*]
+    (println (str "unserved " (str/upper-case (name (:request-method request))) " " (:uri request)
+                  ": " (.getName (class exception)) " " (.getMessage ^Exception exception)))
+    (doseq [frame (take 6 (.getStackTrace ^Exception exception))]
+      (println "   " (str frame)))))
+
+(defn- guarded [handler]
+  (fn [request]
+    (try (handler request)
+         (catch Exception e
+           (report request e)
+           (problem/of 500 "the request could not be served" {:instance (:uri request)})))))
+
 (defn handler [api store]
   (let [model  (:model api)
         routes (-> (mapv (fn [[path data]] [path (merge data (endpoint-map model store data))])
@@ -581,7 +611,7 @@
                    (conj ["/health" {:name :hypermedia.route/health :get (health-endpoint store)}]))]
     (ring/ring-handler (ring/router routes {:conflicts nil})
                        (default-handler)
-                       {:middleware [params/wrap-params keywordise-params]})))
+                       {:middleware [guarded params/wrap-params keywordise-params]})))
 
 (defmacro defapi [sym config]
   (let [model (schema/parse (eval config))]
