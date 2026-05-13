@@ -1,4 +1,10 @@
 #kaocha/v1
-{:tests [{:id :unit :test-paths ["test"] :ns-patterns [".*-test$"]}]
+{:tests [{:id          :unit
+          :test-paths  ["test"]
+          :ns-patterns [".*-test$"]
+          :skip        [hypermedia.e2e-test]}
+         {:id          :e2e
+          :test-paths  ["test"]
+          :ns-patterns ["e2e-test$"]}]
  :reporter kaocha.report/dots
  :color? false}

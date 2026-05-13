@@ -1,0 +1,19 @@
+{:curie "rel"
+ :resources
+ {:player {:table     :e2e_players
+           :fields    {:id   {:type :uuid :identity true :generated true}
+                       :name {:type :string :required true}}
+           :relations {:teams {:kind       :many-to-many
+                               :target     :team
+                               :through    :e2e_membership
+                               :via        :player-id
+                               :target-via :team-id
+                               :embed      true}}}
+  :team   {:table     :e2e_teams
+           :fields    {:id   {:type :uuid :identity true :generated true}
+                       :name {:type :string :required true}}
+           :relations {:players {:kind       :many-to-many
+                                 :target     :player
+                                 :through    :e2e_membership
+                                 :via        :team-id
+                                 :target-via :player-id}}}}}

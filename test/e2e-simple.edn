@@ -1,0 +1,16 @@
+{:curie "rel"
+ :resources
+ {:writer {:table       :e2e_writers
+           :fields      {:id   {:type :uuid :identity true :generated true}
+                         :name {:type :string :required true}}
+           :relations   {:works {:kind :has-many :target :work :via :writer-id}}
+           :searches    {:by-name {:predicates [:name]}}}
+  :work   {:table       :e2e_works
+           :fields      {:id        {:type :uuid :identity true :generated true}
+                         :title     {:type :string :required true}
+                         :year      {:type :long}
+                         :writer-id {:type :uuid}}
+           :relations   {:writer {:kind :belongs-to :target :writer :via :writer-id :embed true}}
+           :projections {:summary {:fields [:title]}}
+           :searches    {:by-title {:predicates [:title]}
+                         :by-year  {:predicates [:year]}}}}}

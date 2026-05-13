@@ -1,0 +1,13 @@
+{:curie "rel"
+ :resources
+ {:record {:table  :e2e_records
+           :fields {:id     {:type :uuid :identity true :generated true}
+                    :label  {:type :string :required true}
+                    :note   {:type :text}
+                    :tally  {:type :long}
+                    :ratio  {:type :double}
+                    :amount {:type :decimal}
+                    :done   {:type :boolean}
+                    :moment {:type :instant}
+                    :day    {:type :date}
+                    :order  {:type :long}}}}}
