@@ -1,35 +1,15 @@
 (ns hypermedia.main-test
-  (:require [clojure.string :as str]
-            [clojure.test :refer [deftest is]]
-            [hypermedia.main :as main]
-            [jsonista.core :as json])
-  (:import (java.net URI)
-           (java.net.http HttpClient HttpClient$Version HttpRequest HttpRequest$BodyPublishers
-                          HttpResponse$BodyHandlers)
-           (java.time Duration)))
-
-(def ^:private client
-  (-> (HttpClient/newBuilder)
-      (.version HttpClient$Version/HTTP_1_1)
-      (.connectTimeout (Duration/ofSeconds 2))
-      (.build)))
+  (:require [clojure.test :refer [deftest is]]
+            [hypermedia.client :as client]
+            [hypermedia.main :as main]))
 
 (defn- request
-  ([port method path] (request port method path nil))
+  ([port method path] (client/request port method path))
   ([port method path payload]
-   (let [body     (if payload
-                    (HttpRequest$BodyPublishers/ofString (json/write-value-as-string payload))
-                    (HttpRequest$BodyPublishers/noBody))
-         built    (cond-> (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" port path)))
-                              (.timeout (Duration/ofSeconds 2))
-                              (.header "Connection" "close")
-                              (.method (str/upper-case (name method)) body))
-                    payload (.header "Content-Type" "application/json"))
-         response (.send client (.build built) (HttpResponse$BodyHandlers/ofString))
-         text     (.body response)]
-     {:status   (.statusCode response)
-      :location (.orElse (.firstValue (.headers response) "location") nil)
-      :body     (when (seq text) (json/read-value text json/keyword-keys-object-mapper))})))
+   (client/request port method path
+                   :body (client/json-body payload)
+                   :content-type "application/json")))
+
 
 (defn- serving [body]
   (let [running (main/start {:schema   "example.edn"
