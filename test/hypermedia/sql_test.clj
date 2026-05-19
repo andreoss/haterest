@@ -43,14 +43,14 @@
 
 (deftest builds-a-select-by-identity
   (let [book (get-in model [:resources :book])]
-    (is (= "SELECT \"id\", \"title\", \"author_id\" FROM \"books\" WHERE \"id\" = ?"
+    (is (= "SELECT \"id\", \"title\", \"author_id\", \"row_version\" FROM \"books\" WHERE \"id\" = ?"
            (sql/select-by-identity book)))))
 
 (deftest builds-a-select-with-criteria
   (let [book (get-in model [:resources :book])]
-    (is (= ["SELECT \"id\", \"title\", \"author_id\" FROM \"books\" WHERE \"author_id\" = ?" 1]
+    (is (= ["SELECT \"id\", \"title\", \"author_id\", \"row_version\" FROM \"books\" WHERE \"author_id\" = ?" 1]
            (sql/select book {:where {:author-id 1}})))
-    (is (= ["SELECT \"id\", \"title\", \"author_id\" FROM \"books\""]
+    (is (= ["SELECT \"id\", \"title\", \"author_id\", \"row_version\" FROM \"books\""]
            (sql/select book {})))))
 
 (deftest refuses-criteria-that-are-not-fields
@@ -59,13 +59,19 @@
 
 (deftest builds-an-insert
   (let [book (get-in model [:resources :book])]
-    (is (= ["INSERT INTO \"books\" (\"id\", \"title\") VALUES (?, ?)" 1 "Dune"]
+    (is (= ["INSERT INTO \"books\" (\"id\", \"title\", \"row_version\") VALUES (?, ?, ?)" 1 "Dune" 0]
            (sql/insert book {:id 1 :title "Dune"})))))
 
 (deftest builds-an-update
   (let [book (get-in model [:resources :book])]
-    (is (= ["UPDATE \"books\" SET \"title\" = ? WHERE \"id\" = ?" "Dune" 1]
-           (sql/update-by-identity book 1 {:title "Dune"})))))
+    (is (= ["UPDATE \"books\" SET \"title\" = ?, \"row_version\" = \"row_version\" + 1 WHERE \"id\" = ?"
+            "Dune" 1]
+           (sql/update-by-identity book 1 {:title "Dune"})))
+    (is (= ["UPDATE \"books\" SET \"title\" = ?, \"row_version\" = \"row_version\" + 1 WHERE \"id\" = ? AND \"row_version\" = ?"
+            "Dune" 1 3]
+           (sql/update-by-identity book 1 {:title "Dune"} 3)))
+    (is (= ["DELETE FROM \"books\" WHERE \"id\" = ? AND \"row_version\" = ?" 1 3]
+           (sql/delete-by-identity book 1 3)))))
 
 (deftest builds-a-delete
   (let [book (get-in model [:resources :book])]
@@ -87,7 +93,7 @@
 
 (deftest pushes-order-and-slice-into-the-statement
   (let [book (get-in model [:resources :book])]
-    (is (= ["SELECT \"id\", \"title\", \"author_id\" FROM \"books\" WHERE \"author_id\" = ? ORDER BY \"title\" ASC, \"id\" DESC LIMIT ? OFFSET ?"
+    (is (= ["SELECT \"id\", \"title\", \"author_id\", \"row_version\" FROM \"books\" WHERE \"author_id\" = ? ORDER BY \"title\" ASC, \"id\" DESC LIMIT ? OFFSET ?"
             1 5 10]
            (sql/select book {:where {:author-id 1} :order [[:title :asc] [:id :desc]] :limit 5 :offset 10})))))
 
@@ -97,9 +103,9 @@
 
 (deftest matches-a-set-with-one-predicate
   (let [book (get-in model [:resources :book])]
-    (is (= ["SELECT \"id\", \"title\", \"author_id\" FROM \"books\" WHERE \"id\" IN (?, ?)" 1 2]
+    (is (= ["SELECT \"id\", \"title\", \"author_id\", \"row_version\" FROM \"books\" WHERE \"id\" IN (?, ?)" 1 2]
            (sql/select book {:where {:id #{1 2}}})))
-    (is (= ["SELECT \"id\", \"title\", \"author_id\" FROM \"books\" WHERE 1 = 0"]
+    (is (= ["SELECT \"id\", \"title\", \"author_id\", \"row_version\" FROM \"books\" WHERE 1 = 0"]
            (sql/select book {:where {:id #{}}})))
     (is (= ["SELECT COUNT(*) AS \"total\" FROM \"books\" WHERE \"id\" IN (?, ?)" 1 2]
            (sql/count-of book {:where {:id #{1 2}}})))))
@@ -107,7 +113,7 @@
 (deftest compiles-the-constant-statements-of-a-model
   (let [compiled (sql/statements model)]
     (is (= #{:author :book} (set (keys compiled))))
-    (is (= "SELECT \"id\", \"title\", \"author_id\" FROM \"books\" WHERE \"id\" = ?"
+    (is (= "SELECT \"id\", \"title\", \"author_id\", \"row_version\" FROM \"books\" WHERE \"id\" = ?"
            (get-in compiled [:book :by-identity])))
     (is (= "DELETE FROM \"books\" WHERE \"id\" = ?" (get-in compiled [:book :delete])))
     (is (= "SELECT COUNT(*) AS \"total\" FROM \"books\"" (get-in compiled [:book :count])))

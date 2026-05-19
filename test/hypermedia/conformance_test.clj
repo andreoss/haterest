@@ -28,9 +28,9 @@
 
 (deftest a-schema-is-expanded-before-the-first-request
   (is (string? (get-in demo [:statements :book :by-identity])))
-  (is (= "SELECT \"id\", \"title\", \"author_id\" FROM \"books\" WHERE \"id\" = ?"
+  (is (= "SELECT \"id\", \"title\", \"author_id\", \"row_version\" FROM \"books\" WHERE \"id\" = ?"
          (get-in demo [:statements :book :by-identity])))
   (let [expansion (macroexpand-1 '(hypermedia.api/defapi x {:resources {:a {:fields {:id {:type :long :identity true}}}}}))]
-    (is (some #(= "SELECT \"id\" FROM \"as\" WHERE \"id\" = ?" %)
+    (is (some #(= "SELECT \"id\", \"row_version\" FROM \"as\" WHERE \"id\" = ?" %)
               (tree-seq coll? seq expansion)))
     (is (some #(= "/as/{id}" %) (tree-seq coll? seq expansion)))))

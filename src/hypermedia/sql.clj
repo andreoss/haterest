@@ -62,6 +62,10 @@
       (get ansi-types type)
       (throw (ex-info "unknown type" {:type ::unknown-type :dialect dialect :field-type type}))))
 
+(def version-column :row_version)
+
+(def version-key :hypermedia/version)
+
 (defn quoted [identifier]
   (str \" (str/replace (name identifier) \" \_) \"))
 
@@ -102,6 +106,7 @@
 (defn create-table [model dialect resource]
   (let [identity-column (quoted (get-in resource [:fields (:identity resource) :column]))
         parts (concat (map #(column-clause dialect resource %) (:field-order resource))
+                      [(str (quoted version-column) " " (column-type dialect :long) " DEFAULT 0 NOT NULL")]
                       [(str "PRIMARY KEY (" identity-column ")")]
                       (foreign-keys model resource))]
     (str "CREATE TABLE " (when-not (creates-only-once? dialect) "IF NOT EXISTS ")
@@ -115,7 +120,7 @@
         (join-tables model dialect)))
 
 (defn projection [resource]
-  (str "SELECT " (str/join ", " (map quoted (columns-of resource)))
+  (str "SELECT " (str/join ", " (map quoted (conj (columns-of resource) version-column)))
        " FROM " (quoted (:table resource))))
 
 (defn select-by-identity [resource]
@@ -180,22 +185,34 @@
   (check-fields resource (keys row))
   (let [fields (write-columns resource row)]
     (into [(str "INSERT INTO " (quoted (:table resource))
-                " (" (str/join ", " (map #(quoted (get-in resource [:fields % :column])) fields)) ")"
-                " VALUES (" (str/join ", " (repeat (count fields) "?")) ")")]
-          (map #(get row %) fields))))
+                " (" (str/join ", " (conj (mapv #(quoted (get-in resource [:fields % :column])) fields)
+                                          (quoted version-column))) ")"
+                " VALUES (" (str/join ", " (repeat (inc (count fields)) "?")) ")")]
+          (conj (mapv #(get row %) fields) 0))))
 
-(defn update-by-identity [resource id row]
-  (check-fields resource (keys row))
-  (let [fields (remove #(= % (:identity resource)) (write-columns resource row))]
-    (into [(str "UPDATE " (quoted (:table resource)) " SET "
-                (str/join ", " (map #(str (quoted (get-in resource [:fields % :column])) " = ?") fields))
-                " WHERE " (quoted (get-in resource [:fields (:identity resource) :column])) " = ?")]
-          (conj (mapv #(get row %) fields) id))))
+(defn update-by-identity
+  ([resource id row] (update-by-identity resource id row nil))
+  ([resource id row expected]
+   (check-fields resource (keys row))
+   (let [fields (remove #(= % (:identity resource)) (write-columns resource row))
+         bump   (str (quoted version-column) " = " (quoted version-column) " + 1")]
+     (into [(str "UPDATE " (quoted (:table resource)) " SET "
+                 (str/join ", " (conj (mapv #(str (quoted (get-in resource [:fields % :column])) " = ?")
+                                            fields)
+                                      bump))
+                 " WHERE " (quoted (get-in resource [:fields (:identity resource) :column])) " = ?"
+                 (when expected (str " AND " (quoted version-column) " = ?")))]
+           (cond-> (conj (mapv #(get row %) fields) id)
+             expected (conj expected))))))
 
-(defn delete-by-identity [resource id]
-  [(str "DELETE FROM " (quoted (:table resource))
-        " WHERE " (quoted (get-in resource [:fields (:identity resource) :column])) " = ?")
-   id])
+(defn delete-by-identity
+  ([resource id] (delete-by-identity resource id nil))
+  ([resource id expected]
+   (cond-> [(str "DELETE FROM " (quoted (:table resource))
+                 " WHERE " (quoted (get-in resource [:fields (:identity resource) :column])) " = ?"
+                 (when expected (str " AND " (quoted version-column) " = ?")))
+            id]
+     expected (conj expected))))
 
 (defn- stored-as [dialect type]
   (column-type dialect type))
@@ -309,7 +326,8 @@
   ([target relation owner-id criteria] (select-linked :ansi target relation owner-id criteria))
   ([dialect target relation owner-id {:keys [order limit offset]}]
    (let [fetch (fetch-clause dialect limit offset)]
-     (into [(str "SELECT " (str/join ", " (map #(str "t." (quoted %)) (columns-of target)))
+     (into [(str "SELECT " (str/join ", " (map #(str "t." (quoted %))
+                                               (conj (columns-of target) version-column)))
                  (linked-source target relation)
                  (order-clause target order "t.")
                  (:sql fetch))]

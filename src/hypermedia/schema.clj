@@ -12,6 +12,8 @@
 
 (def relation-kinds #{:belongs-to :has-one :has-many :many-to-many})
 
+(def reserved-column :row_version)
+
 (def set-kinds #{:has-many :many-to-many})
 
 (def Field
@@ -145,6 +147,10 @@
            [f spec'] (:fields spec)
            :when (not (contains? field-types (:type spec')))]
        {:path [:resources k :fields f] :error :unknown-type :detail (:type spec')})
+     (for [[k spec] resources
+           [f spec'] (:fields spec)
+           :when (= reserved-column (or (:column spec') (column f)))]
+       {:path [:resources k :fields f] :error :reserved-column :detail reserved-column})
      (for [[k spec] resources
            [r spec'] (:relations spec)
            :when (not (contains? relation-kinds (:kind spec')))]

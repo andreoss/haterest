@@ -9,7 +9,10 @@
 
 (defn- canonical [row]
   (json/write-value-as-string
-   (into (sorted-map) (map (fn [[k v]] [k (some-> v str)])) row)
+   (into (sorted-map)
+         (comp (remove (fn [[k _]] (qualified-keyword? k)))
+               (map (fn [[k v]] [k (some-> v str)])))
+         row)
    mapper))
 
 (defn of [row]

@@ -19,3 +19,9 @@
     (is (false? (etag/matches? "\"other\"" tag)))
     (is (false? (etag/matches? nil tag)))
     (is (false? (etag/matches? "" tag)))))
+
+(deftest bookkeeping-does-not-reach-the-tag
+  (is (= (etag/of {:id 1 :title "Dune"})
+         (etag/of {:id 1 :title "Dune" :hypermedia/version 7})))
+  (is (not= (etag/of {:id 1 :title "Dune"})
+            (etag/of {:id 1 :title "Emma" :hypermedia/version 7}))))

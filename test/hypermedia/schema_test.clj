@@ -204,3 +204,11 @@
     (is (empty? errors))
     (is (contains? value :done))
     (is (nil? (:done value)))))
+
+(deftest refuses-a-field-that-takes-the-bookkeeping-column
+  (is (thrown? clojure.lang.ExceptionInfo
+               (schema/parse {:resources {:a {:fields {:id          {:type :long :identity true}
+                                                       :row-version {:type :long}}}}})))
+  (is (thrown? clojure.lang.ExceptionInfo
+               (schema/parse {:resources {:a {:fields {:id {:type :long :identity true}
+                                                       :v  {:type :long :column :row_version}}}}}))))
