@@ -110,7 +110,7 @@
               (if (and selected (not (contains? selected label)))
                 (update acc :declined conj [label "not selected"])
                 (if-let [engine (try (build) (catch Exception e
-                                               (println "engine" label "refused:" (.getMessage e))
+                                               (.println System/err (str "engine " label " refused: " (.getMessage e)))
                                                nil))]
                   (update acc :ready conj engine)
                   (update acc :declined conj [label "unavailable"]))))

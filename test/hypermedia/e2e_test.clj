@@ -189,9 +189,9 @@
 
 (deftest every-engine-serves-the-same-api
   (let [{:keys [ready declined]} (database/engines)]
-    (println "e2e engines ready:" (mapv (comp name :name) ready))
+    (.println System/err (str "e2e engines ready: " (str/join ", " (map (comp name :name) ready))))
     (when (seq declined)
-      (println "e2e engines declined:" (mapv first declined)))
+      (.println System/err (str "e2e engines declined: " (str/join ", " (map first declined)))))
     (is (seq ready) "no database engine was available")
     (is (contains? (set (map :name ready)) :h2) "the embedded engine must always run")
     (doseq [engine ready]
