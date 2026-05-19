@@ -53,23 +53,35 @@
   (create! [this resource row]
     (known-fields resource (keys row))
     (let [id (get row (:identity resource))]
-      (swap! state assoc-in [(:name resource) id] row)
+      (swap! state assoc-in [(:name resource) id] (assoc row store/version-key 0))
       (store/fetch this resource id)))
-  (replace! [this resource id row]
+  (replace! [this resource id row expected]
     (known-fields resource (keys row))
-    (let [existed (some? (store/fetch this resource id))
-          stored  (assoc row (:identity resource) id)]
-      (swap! state assoc-in [(:name resource) id] stored)
-      {:created? (not existed) :row (store/fetch this resource id)}))
-  (amend! [this resource id row]
+    (let [current (store/fetch this resource id)]
+      (if (and expected (not= expected (store/version-of current)))
+        {:outcome :stale}
+        (let [stored (assoc row
+                            (:identity resource) id
+                            store/version-key (inc (or (store/version-of current) -1)))]
+          (swap! state assoc-in [(:name resource) id] stored)
+          {:outcome (if current :written :created) :row (store/fetch this resource id)}))))
+  (amend! [this resource id row expected]
     (known-fields resource (keys row))
-    (when (store/fetch this resource id)
-      (swap! state update-in [(:name resource) id] merge (dissoc row (:identity resource)))
-      (store/fetch this resource id)))
-  (erase! [this resource id]
-    (if (store/fetch this resource id)
-      (do (swap! state update (:name resource) dissoc id) true)
-      false))
+    (let [current (store/fetch this resource id)]
+      (cond
+        (nil? current) {:outcome :absent}
+        (and expected (not= expected (store/version-of current))) {:outcome :stale}
+        :else
+        (do (swap! state update-in [(:name resource) id]
+                   (fn [held] (-> (merge held (dissoc row (:identity resource)))
+                                  (assoc store/version-key (inc (or (store/version-of held) 0))))))
+            {:outcome :written :row (store/fetch this resource id)}))))
+  (erase! [this resource id expected]
+    (let [current (store/fetch this resource id)]
+      (cond
+        (nil? current) {:outcome :absent}
+        (and expected (not= expected (store/version-of current))) {:outcome :stale}
+        :else (do (swap! state update (:name resource) dissoc id) {:outcome :erased}))))
   (transact [this body] (locking state (body this)))
   (linked [this _ target relation owner-id criteria]
     (let [ids (into #{} (keep (fn [[o t]] (when (= o owner-id) t))) (pairs state relation))]

@@ -87,16 +87,15 @@
                   (let [book (get-in model [:resources :book])]
                     (is (= "Emma" (:title (store/create! s book {:id 3 :title "Emma" :author-id 1}))))
                     (is (= 3 (store/total s book {})))
-                    (let [{:keys [created? row]} (store/replace! s book 3 {:title "Persuasion"})]
-                      (is (false? created?))
+                    (let [{:keys [outcome row]} (store/replace! s book 3 {:title "Persuasion"} nil)]
+                      (is (= :written outcome))
                       (is (= "Persuasion" (:title row)))
                       (is (nil? (:author-id row))))
-                    (let [{:keys [created?]} (store/replace! s book 4 {:title "Emma"})]
-                      (is (true? created?)))
-                    (is (= "Emma!" (:title (store/amend! s book 4 {:title "Emma!"}))))
-                    (is (nil? (store/amend! s book 99 {:title "x"})))
-                    (is (true? (store/erase! s book 4)))
-                    (is (false? (store/erase! s book 4)))))))))
+                    (is (= :created (:outcome (store/replace! s book 4 {:title "Emma"} nil))))
+                    (is (= "Emma!" (:title (:row (store/amend! s book 4 {:title "Emma!"} nil)))))
+                    (is (= :absent (:outcome (store/amend! s book 99 {:title "x"} nil))))
+                    (is (= :erased (:outcome (store/erase! s book 4 nil))))
+                    (is (= :absent (:outcome (store/erase! s book 4 nil))))))))))
 
 (deftest a-transaction-is-rolled-back-on-failure
   (doseq [url (urls)]

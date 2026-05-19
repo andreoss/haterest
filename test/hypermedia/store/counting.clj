@@ -8,9 +8,11 @@
   (total [_ resource criteria] (swap! tally update :total (fnil inc 0)) (store/total inner resource criteria))
   (probe [_] (store/probe inner))
   (create! [_ resource row] (store/create! inner resource row))
-  (replace! [_ resource id row] (store/replace! inner resource id row))
-  (amend! [_ resource id row] (swap! tally update :amend (fnil inc 0)) (store/amend! inner resource id row))
-  (erase! [_ resource id] (store/erase! inner resource id))
+  (replace! [_ resource id row expected] (store/replace! inner resource id row expected))
+  (amend! [_ resource id row expected]
+    (swap! tally update :amend (fnil inc 0))
+    (store/amend! inner resource id row expected))
+  (erase! [_ resource id expected] (store/erase! inner resource id expected))
   (transact [this body] (body this))
   (linked [_ owner target relation owner-id criteria]
     (swap! tally update :query (fnil inc 0))
