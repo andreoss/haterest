@@ -62,7 +62,7 @@
         {:outcome :stale}
         (let [stored (assoc row
                             (:identity resource) id
-                            store/version-key (inc (or (store/version-of current) -1)))]
+                            store/version-key (if current (inc (store/version-of current)) 0))]
           (swap! state assoc-in [(:name resource) id] stored)
           {:outcome (if current :written :created) :row (store/fetch this resource id)}))))
   (amend! [this resource id row expected]
@@ -74,7 +74,7 @@
         :else
         (do (swap! state update-in [(:name resource) id]
                    (fn [held] (-> (merge held (dissoc row (:identity resource)))
-                                  (assoc store/version-key (inc (or (store/version-of held) 0))))))
+                                  (assoc store/version-key (inc (store/version-of held))))))
             {:outcome :written :row (store/fetch this resource id)}))))
   (erase! [this resource id expected]
     (let [current (store/fetch this resource id)]

@@ -18,4 +18,4 @@
 
 (def version-key :hypermedia/version)
 
-(defn version-of [row] (get row version-key))
+(defn version-of [row] (or (get row version-key) 0))

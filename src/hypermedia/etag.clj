@@ -1,27 +1,25 @@
 (ns hypermedia.etag
-  (:require [clojure.string :as str]
-            [jsonista.core :as json])
-  (:import (java.nio.charset StandardCharsets)
-           (java.security MessageDigest)
-           (java.util Base64)))
+  (:require [clojure.string :as str]))
 
-(def ^:private mapper (json/object-mapper {:encode-key-fn name}))
+(defn of [version]
+  (str "\"" (or version 0) "\""))
 
-(defn- canonical [row]
-  (json/write-value-as-string
-   (into (sorted-map)
-         (comp (remove (fn [[k _]] (qualified-keyword? k)))
-               (map (fn [[k v]] [k (some-> v str)])))
-         row)
-   mapper))
+(defn wildcard? [header]
+  (= "*" (str/trim (str header))))
 
-(defn of [row]
-  (let [digest (.digest (MessageDigest/getInstance "SHA-256")
-                        (.getBytes (canonical row) StandardCharsets/UTF_8))]
-    (str "\"" (.encodeToString (.withoutPadding (Base64/getUrlEncoder)) digest) "\"")))
+(defn- quoted-version [tag]
+  (let [text (str/trim tag)]
+    (when (and (str/starts-with? text "\"") (str/ends-with? text "\"") (< 2 (count text)))
+      (try (Long/parseLong (subs text 1 (dec (count text))))
+           (catch Exception _ nil)))))
 
-(defn matches? [header tag]
+(defn versions-in [header]
   (if (str/blank? header)
-    false
-    (boolean (some #(or (= % "*") (= % tag))
-                   (map str/trim (str/split header #","))))))
+    []
+    (vec (keep quoted-version (str/split header #",")))))
+
+(defn matches? [header version]
+  (cond
+    (str/blank? header) false
+    (wildcard? header)  true
+    :else               (contains? (set (versions-in header)) version)))
