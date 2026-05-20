@@ -1,6 +1,8 @@
 (ns hypermedia.precondition-test
   (:require [clojure.test :refer [deftest is]]
             [hypermedia.api :as api]
+            [hypermedia.etag :as etag]
+            [hypermedia.store]
             [hypermedia.store.memory :as memory]
             [jsonista.core :as json]))
 
@@ -105,3 +107,41 @@
   (is (nil? (get-in (call (subject) :get "/books/1") [:body :_templates])))
   (is (= "application/hal+json;charset=utf-8"
          (get-in (call (subject) :get "/books/1") [:headers "Content-Type"]))))
+
+(def versioned
+  {:resources {:note {:fields {:id   {:type :long :identity true}
+                               :body {:type :string :required true}}}}})
+
+(api/defapi notes versioned)
+
+(defn- conflicting []
+  (let [held (atom {:id 1 :body "first" :hypermedia/version 3})]
+    (reify hypermedia.store/Store
+      (fetch [_ _ id] (when (= 1 id) @held))
+      (query [_ _ _] [@held])
+      (total [_ _ _] 1)
+      (probe [_] true)
+      (create! [_ _ row] row)
+      (replace! [_ _ _ _ _] {:outcome :conflict})
+      (amend! [_ _ _ _ _] {:outcome :conflict})
+      (erase! [_ _ _ _] {:outcome :conflict})
+      (transact [this body] (body this)))))
+
+(defn- against-conflict [method path options]
+  (let [handler (api/handler notes (conflicting))]
+    (handler (merge {:request-method method :uri path} options))))
+
+(deftest a-conflict-under-a-precondition-is-a-precondition-failure
+  (doseq [method [:put :patch]]
+    (is (= 412 (:status (against-conflict method "/notes/1"
+                                          {:body    (json/write-value-as-string {:body "second"})
+                                           :headers {"content-type" "application/json"
+                                                     "if-match"     (etag/of {:id 1 :body "first"})}})))))
+  (is (= 412 (:status (against-conflict :delete "/notes/1"
+                                        {:headers {"if-match" (etag/of {:id 1 :body "first"})}})))))
+
+(deftest a-conflict-without-a-precondition-is-a-conflict
+  (is (= 409 (:status (against-conflict :patch "/notes/1"
+                                        {:body    (json/write-value-as-string {:body "second"})
+                                         :headers {"content-type" "application/json"}}))))
+  (is (= 409 (:status (against-conflict :delete "/notes/1" {})))))

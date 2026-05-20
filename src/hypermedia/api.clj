@@ -261,6 +261,12 @@
 (defn- precondition-failed [request]
   (problem/of 412 "the resource has moved on since it was read" {:instance (:uri request)}))
 
+(defn- refused [request]
+  (if (str/blank? (get-in request [:headers "if-match"]))
+    (problem/of 409 "the resource was written by someone else at the same time"
+                {:instance (:uri request)})
+    (precondition-failed request)))
+
 (def ^:private slice-params #{"page" "size" "sort"})
 
 (defn- query-suffix [request]
@@ -379,10 +385,14 @@
          (let [current (store/fetch tx resource id)]
            (if (and current (stale? request current))
              (precondition-failed request)
-             (let [{:keys [created? row]} (store/replace! tx resource id row)]
-               (document resource :item (single-doc model tx resource row nil) (if created? 201 200)
-                         {"Location" (uri/expand (:self-template resource) {(:identity resource) id})
-                          "ETag"     (etag/of row)})))))))))
+             (let [written (store/replace! tx resource id row (store/version-of current))]
+               (if (contains? #{:stale :conflict} (:outcome written))
+                 (refused request)
+                 (document resource :item
+                           (single-doc model tx resource (:row written) nil)
+                           (if (= :created (:outcome written)) 201 200)
+                           {"Location" (uri/expand (:self-template resource) {(:identity resource) id})
+                            "ETag"     (etag/of (:row written))}))))))))))
 
 (defn- handle-amend [model store resource request]
   (let [id (identity-of resource request)
@@ -398,10 +408,14 @@
            (cond
              (nil? current)           (missing request)
              (stale? request current) (precondition-failed request)
-             :else (if-let [stored (store/amend! tx resource id row)]
-                     (document resource :item (single-doc model tx resource stored nil) 200
-                               {"ETag" (etag/of stored)})
-                     (missing request)))))))))
+             :else
+             (let [written (store/amend! tx resource id row (store/version-of current))]
+               (case (:outcome written)
+                 :absent   (missing request)
+                 (:stale :conflict) (refused request)
+                 (document resource :item
+                           (single-doc model tx resource (:row written) nil) 200
+                           {"ETag" (etag/of (:row written))}))))))))))
 
 (defn- handle-erase [store resource request]
   (let [id (identity-of resource request)]
@@ -414,11 +428,14 @@
            (cond
              (nil? current)           (missing request)
              (stale? request current) (precondition-failed request)
-             (store/erase! tx resource id) no-content
-             :else                    (missing request))))))))
+             :else
+             (case (:outcome (store/erase! tx resource id (store/version-of current)))
+               :absent   (missing request)
+               (:stale :conflict) (refused request)
+               no-content))))))))
 
 (defn- bind-one [store target ids owner-id via]
-  (doseq [id ids] (store/amend! store target id {via owner-id})))
+  (doseq [id ids] (store/amend! store target id {via owner-id} nil)))
 
 (defn- handle-bind [model store resource relation request]
   (let [target (get-in model [:resources (:target relation)])
@@ -435,14 +452,19 @@
         (problem/of 422 "this relation holds one resource" {:instance (:uri request)})
         (nil? (store/fetch store target (first ids)))
         (problem/of 422 "the referenced resource does not exist" {:instance (:uri request)})
-        :else (store/transact
-               store
-               (fn [tx]
-                 (let [current (store/fetch tx resource id)]
-                   (if (and current (stale? request current))
-                     (precondition-failed request)
-                     (do (store/amend! tx resource id {(:via relation) (first ids)})
-                         no-content))))))
+        :else
+        (store/transact
+         store
+         (fn [tx]
+           (let [current (store/fetch tx resource id)]
+             (if (and current (stale? request current))
+               (precondition-failed request)
+               (let [written (store/amend! tx resource id {(:via relation) (first ids)}
+                                           (store/version-of current))]
+                 (case (:outcome written)
+                   :absent   (missing request)
+                   (:stale :conflict) (refused request)
+                   no-content)))))))
 
       (not (every? #(some? (store/fetch store target %)) ids))
       (problem/of 422 "the referenced resource does not exist" {:instance (:uri request)})
@@ -464,7 +486,7 @@
              (when (= :put (:request-method request))
                (doseq [row   (store/query tx target {:where {(:via relation) id}})
                        :when (not (contains? (set ids) (get row (:identity target))))]
-                 (store/amend! tx target (get row (:identity target)) {(:via relation) nil})))
+                 (store/amend! tx target (get row (:identity target)) {(:via relation) nil} nil)))
              (bind-one tx target ids id (:via relation))))
           no-content))))
 
@@ -478,8 +500,11 @@
            (nil? owner)           (missing request)
            (stale? request owner) (precondition-failed request)
            (= :belongs-to (:kind relation))
-           (do (store/amend! tx resource id {(:via relation) nil})
-               no-content)
+           (if (contains? #{:stale :conflict}
+                          (:outcome (store/amend! tx resource id {(:via relation) nil}
+                                                  (store/version-of owner))))
+             (refused request)
+             no-content)
            :else (missing request)))))))
 
 (defn- handle-unbind-member [model store resource relation request]
@@ -498,7 +523,7 @@
         (missing request))
 
       (= id (get referent (:via relation)))
-      (do (store/transact store (fn [tx] (store/amend! tx target member {(:via relation) nil})))
+      (do (store/transact store (fn [tx] (store/amend! tx target member {(:via relation) nil} nil)))
           no-content)
 
       :else (missing request))))
