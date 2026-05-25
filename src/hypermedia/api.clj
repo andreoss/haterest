@@ -254,9 +254,12 @@
                                                   {:field :uri :error :unreadable :detail href}))})}
           {:ids (vec (distinct ids))})))))
 
-(defn- stale? [request row]
-  (let [given (get-in request [:headers "if-match"])]
-    (and (not (str/blank? given)) (not (etag/matches? given (etag/of row))))))
+(defn- precondition [request current]
+  (let [header (get-in request [:headers "if-match"])]
+    (cond
+      (str/blank? header) {:expected (store/version-of current)}
+      (etag/matches? header (store/version-of current)) {:expected (store/version-of current)}
+      :else {:unmatchable true})))
 
 (defn- precondition-failed [request]
   (problem/of 412 "the resource has moved on since it was read" {:instance (:uri request)}))
@@ -312,15 +315,17 @@
              (fn [] (store/linked-total store owner target relation owner-id))))
 
 (defn- fresh? [request row]
-  (etag/matches? (get-in request [:headers "if-none-match"]) (etag/of row)))
+  (etag/matches? (get-in request [:headers "if-none-match"]) (store/version-of row)))
 
 (defn- item-response [model store resource row request]
   (let [{:keys [projection problem]} (projection-of resource request)]
     (cond
       problem            problem
-      (fresh? request row) {:status 304 :headers {"ETag" (etag/of row)} :body nil}
+      (fresh? request row) {:status 304
+                            :headers {"ETag" (etag/of (store/version-of row))}
+                            :body nil}
       :else (document resource :item (single-doc model store resource row projection) 200
-                      {"ETag" (etag/of row)}))))
+                      {"ETag" (etag/of (store/version-of row))}))))
 
 (defn- handle-collection [model store resource request]
   (sliced model store resource (:path resource) {} request))
@@ -370,7 +375,7 @@
                                       {"Location" (uri/expand (:self-template resource)
                                                               {(:identity resource)
                                                                (get stored (:identity resource))})
-                                       "ETag"     (etag/of stored)})))))))
+                                       "ETag"     (etag/of (store/version-of stored))})))))))
 
 (defn- handle-replace [model store resource request]
   (let [id (identity-of resource request)
@@ -382,17 +387,18 @@
       (store/transact
        store
        (fn [tx]
-         (let [current (store/fetch tx resource id)]
-           (if (and current (stale? request current))
-             (precondition-failed request)
-             (let [written (store/replace! tx resource id row (store/version-of current))]
+         (let [current (store/fetch tx resource id)
+               {:keys [expected unmatchable]} (precondition request current)]
+           (if unmatchable
+             (refused request)
+             (let [written (store/replace! tx resource id row expected)]
                (if (contains? #{:stale :conflict} (:outcome written))
                  (refused request)
                  (document resource :item
                            (single-doc model tx resource (:row written) nil)
                            (if (= :created (:outcome written)) 201 200)
                            {"Location" (uri/expand (:self-template resource) {(:identity resource) id})
-                            "ETag"     (etag/of (:row written))}))))))))))
+                            "ETag"     (etag/of (store/version-of (:row written)))}))))))))))
 
 (defn- handle-amend [model store resource request]
   (let [id (identity-of resource request)
@@ -404,18 +410,19 @@
       (store/transact
        store
        (fn [tx]
-         (let [current (store/fetch tx resource id)]
+         (let [current (store/fetch tx resource id)
+               {:keys [expected unmatchable]} (precondition request current)]
            (cond
-             (nil? current)           (missing request)
-             (stale? request current) (precondition-failed request)
+             (nil? current) (missing request)
+             unmatchable    (refused request)
              :else
-             (let [written (store/amend! tx resource id row (store/version-of current))]
+             (let [written (store/amend! tx resource id row expected)]
                (case (:outcome written)
-                 :absent   (missing request)
+                 :absent            (missing request)
                  (:stale :conflict) (refused request)
                  (document resource :item
                            (single-doc model tx resource (:row written) nil) 200
-                           {"ETag" (etag/of (:row written))}))))))))))
+                           {"ETag" (etag/of (store/version-of (:row written)))}))))))))))
 
 (defn- handle-erase [store resource request]
   (let [id (identity-of resource request)]
@@ -424,15 +431,25 @@
       (store/transact
        store
        (fn [tx]
-         (let [current (store/fetch tx resource id)]
+         (let [current (store/fetch tx resource id)
+               {:keys [expected unmatchable]} (precondition request current)]
            (cond
-             (nil? current)           (missing request)
-             (stale? request current) (precondition-failed request)
+             (nil? current) (missing request)
+             unmatchable    (refused request)
              :else
-             (case (:outcome (store/erase! tx resource id (store/version-of current)))
-               :absent   (missing request)
+             (case (:outcome (store/erase! tx resource id expected))
+               :absent            (missing request)
                (:stale :conflict) (refused request)
                no-content))))))))
+
+(defn- claim-owner
+  [store resource id request]
+  (let [current (store/fetch store resource id)
+        {:keys [expected unmatchable]} (precondition request current)]
+    (cond
+      (nil? current) {:outcome :absent}
+      unmatchable    {:outcome :stale}
+      :else          (store/amend! store resource id {} expected))))
 
 (defn- bind-one [store target ids owner-id via]
   (doseq [id ids] (store/amend! store target id {via owner-id} nil)))
@@ -446,66 +463,57 @@
       (nil? owner) (missing request)
       problem      problem
 
-      (= :belongs-to (:kind relation))
-      (cond
-        (not= 1 (count ids))
-        (problem/of 422 "this relation holds one resource" {:instance (:uri request)})
-        (nil? (store/fetch store target (first ids)))
-        (problem/of 422 "the referenced resource does not exist" {:instance (:uri request)})
-        :else
-        (store/transact
-         store
-         (fn [tx]
-           (let [current (store/fetch tx resource id)]
-             (if (and current (stale? request current))
-               (precondition-failed request)
-               (let [written (store/amend! tx resource id {(:via relation) (first ids)}
-                                           (store/version-of current))]
-                 (case (:outcome written)
-                   :absent   (missing request)
-                   (:stale :conflict) (refused request)
-                   no-content)))))))
+      (and (= :belongs-to (:kind relation)) (not= 1 (count ids)))
+      (problem/of 422 "this relation holds one resource" {:instance (:uri request)})
 
       (not (every? #(some? (store/fetch store target %)) ids))
       (problem/of 422 "the referenced resource does not exist" {:instance (:uri request)})
 
-      (= :many-to-many (:kind relation))
-      (do (store/transact
-           store
-           (fn [tx]
-             (when (= :put (:request-method request))
-               (store/unlink! tx resource target relation id nil))
-             (let [already (into #{} (map second) (store/links-of tx resource target relation [id]))]
-               (store/link! tx resource target relation id (remove already ids)))))
-          no-content)
-
       :else
-      (do (store/transact
-           store
-           (fn [tx]
-             (when (= :put (:request-method request))
-               (doseq [row   (store/query tx target {:where {(:via relation) id}})
-                       :when (not (contains? (set ids) (get row (:identity target))))]
-                 (store/amend! tx target (get row (:identity target)) {(:via relation) nil} nil)))
-             (bind-one tx target ids id (:via relation))))
-          no-content))))
+      (store/transact
+       store
+       (fn [tx]
+         (let [claimed (if (= :belongs-to (:kind relation))
+                         (let [current (store/fetch tx resource id)
+                               {:keys [expected unmatchable]} (precondition request current)]
+                           (if unmatchable
+                             {:outcome :stale}
+                             (store/amend! tx resource id {(:via relation) (first ids)} expected)))
+                         (claim-owner tx resource id request))]
+           (case (:outcome claimed)
+             :absent            (missing request)
+             (:stale :conflict) (refused request)
+             (do
+               (when (= :many-to-many (:kind relation))
+                 (when (= :put (:request-method request))
+                   (store/unlink! tx resource target relation id nil))
+                 (let [already (into #{} (map second) (store/links-of tx resource target relation [id]))]
+                   (store/link! tx resource target relation id (remove already ids))))
+               (when (= :has-many (:kind relation))
+                 (when (= :put (:request-method request))
+                   (doseq [row   (store/query tx target {:where {(:via relation) id}})
+                           :when (not (contains? (set ids) (get row (:identity target))))]
+                     (store/amend! tx target (get row (:identity target)) {(:via relation) nil} nil)))
+                 (bind-one tx target ids id (:via relation)))
+               no-content))))))))
 
 (defn- handle-unbind [model store resource relation request]
   (let [id (identity-of resource request)]
     (store/transact
      store
      (fn [tx]
-       (let [owner (some->> id (store/fetch tx resource))]
-         (cond
-           (nil? owner)           (missing request)
-           (stale? request owner) (precondition-failed request)
-           (= :belongs-to (:kind relation))
-           (if (contains? #{:stale :conflict}
-                          (:outcome (store/amend! tx resource id {(:via relation) nil}
-                                                  (store/version-of owner))))
-             (refused request)
-             no-content)
-           :else (missing request)))))))
+       (if-not (= :belongs-to (:kind relation))
+         (missing request)
+         (let [current (store/fetch tx resource id)
+               {:keys [expected unmatchable]} (precondition request current)]
+           (cond
+             (nil? current) (missing request)
+             unmatchable    (refused request)
+             :else
+             (case (:outcome (store/amend! tx resource id {(:via relation) nil} expected))
+               :absent            (missing request)
+               (:stale :conflict) (refused request)
+               no-content))))))))
 
 (defn- handle-unbind-member [model store resource relation request]
   (let [target   (get-in model [:resources (:target relation)])
@@ -518,13 +526,27 @@
       (not (and owner referent)) (missing request)
 
       (= :many-to-many (:kind relation))
-      (if (pos? (store/transact store (fn [tx] (store/unlink! tx resource target relation id [member]))))
-        no-content
-        (missing request))
+      (store/transact
+       store
+       (fn [tx]
+         (let [claimed (claim-owner tx resource id request)]
+           (case (:outcome claimed)
+             :absent            (missing request)
+             (:stale :conflict) (refused request)
+             (if (pos? (store/unlink! tx resource target relation id [member]))
+               no-content
+               (missing request))))))
 
       (= id (get referent (:via relation)))
-      (do (store/transact store (fn [tx] (store/amend! tx target member {(:via relation) nil} nil)))
-          no-content)
+      (store/transact
+       store
+       (fn [tx]
+         (let [claimed (claim-owner tx resource id request)]
+           (case (:outcome claimed)
+             :absent            (missing request)
+             (:stale :conflict) (refused request)
+             (do (store/amend! tx target member {(:via relation) nil} nil)
+                 no-content)))))
 
       :else (missing request))))
 
