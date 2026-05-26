@@ -11,6 +11,7 @@
                          :year      {:type :long}
                          :writer-id {:type :uuid}}
            :relations   {:writer {:kind :belongs-to :target :writer :via :writer-id :embed true}}
-           :projections {:summary {:fields [:title]}}
+           :projections {:summary {:fields [:title]}
+                         :plain   {:fields [:title :year]}}
            :searches    {:by-title {:predicates [:title]}
                          :by-year  {:predicates [:year]}}}}}
