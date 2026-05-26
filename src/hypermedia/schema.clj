@@ -1,5 +1,6 @@
 (ns hypermedia.schema
   (:require [clojure.string :as str]
+            [hypermedia.uri :as uri]
             [malli.core :as m]
             [malli.error :as me])
   (:import (java.net URLDecoder)
@@ -89,6 +90,7 @@
     [k (-> spec
            (assoc :name k
                   :path self
+                  :parts (uri/compiled self)
                   :member-template (when (contains? set-kinds (:kind spec))
                                      (str self "/{" (name (:target spec)) "-key}"))
                   :join (when (= :many-to-many (:kind spec))
@@ -120,6 +122,7 @@
         :collection    collection
         :path          path
         :self-template (str path "/{" (name (or id :id)) "}")
+        :self-parts    (uri/compiled (str path "/{" (name (or id :id)) "}"))
         :profile-path  (str "/profile/" (name collection))
         :search-path   (str path "/search")
         :projections   (into {} (map normalise-projection) (:projections spec))

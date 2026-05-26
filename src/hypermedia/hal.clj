@@ -3,11 +3,15 @@
 
 (def media-type "application/hal+json")
 
+(defn href
+  ([target] {:href target})
+  ([target attributes] (if attributes (into {:href target} attributes) {:href target})))
+
 (defn link
-  ([href] (link href nil))
-  ([href attributes]
-   (cond-> (into {:href href} attributes)
-     (uri/templated? href) (assoc :templated true))))
+  ([target] (link target nil))
+  ([target attributes]
+   (cond-> (href target attributes)
+     (uri/templated? target) (assoc :templated true))))
 
 (defn document
   ([properties links] (document properties links nil))

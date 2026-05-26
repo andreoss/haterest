@@ -65,8 +65,8 @@
 (defn links [base pageable total]
   (let [last-page (dec (pages pageable total))
         number    (:number pageable)]
-    (cond-> {:self  (hal/link (href base pageable number))
-             :first (hal/link (href base pageable 0))
-             :last  (hal/link (href base pageable last-page))}
-      (pos? number)          (assoc :prev (hal/link (href base pageable (dec number))))
-      (< number last-page)   (assoc :next (hal/link (href base pageable (inc number)))))))
+    (cond-> {:self  (hal/href (href base pageable number))
+             :first (hal/href (href base pageable 0))
+             :last  (hal/href (href base pageable last-page))}
+      (pos? number)        (assoc :prev (hal/href (href base pageable (dec number))))
+      (< number last-page) (assoc :next (hal/href (href base pageable (inc number)))))))
