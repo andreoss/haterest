@@ -82,6 +82,20 @@
         (nil? current) {:outcome :absent}
         (and expected (not= expected (store/version-of current))) {:outcome :stale}
         :else (do (swap! state update (:name resource) dissoc id) {:outcome :erased}))))
+  (amend-where! [this resource where row]
+    (known-fields resource (keys where))
+    (known-fields resource (keys row))
+    (let [held    (get @state (:name resource))
+          hit     (filterv (fn [[_ v]] (every? (fn [[k expected]] (holds? expected (get v k))) where))
+                           held)
+          changes (dissoc row (:identity resource))]
+      (swap! state update (:name resource)
+             (fn [rows]
+               (reduce (fn [m [id v]]
+                         (assoc m id (-> (merge v changes)
+                                         (assoc store/version-key (inc (store/version-of v))))))
+                       rows hit)))
+      (count hit)))
   (transact [this body] (locking state (body this)))
   (linked [this _ target relation owner-id criteria]
     (let [ids (into #{} (keep (fn [[o t]] (when (= o owner-id) t))) (pairs state relation))]

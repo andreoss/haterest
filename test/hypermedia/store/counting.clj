@@ -13,6 +13,9 @@
     (swap! tally update :amend (fnil inc 0))
     (store/amend! inner resource id row expected))
   (erase! [_ resource id expected] (store/erase! inner resource id expected))
+  (amend-where! [_ resource where row]
+    (swap! tally update :amend (fnil inc 0))
+    (store/amend-where! inner resource where row))
   (transact [this body] (body this))
   (linked [_ owner target relation owner-id criteria]
     (swap! tally update :query (fnil inc 0))

@@ -365,3 +365,16 @@
                          " IN (" (str/join ", " (repeat (count ids) "?")) ")")
                     " AND 1 = 0")))]
           (cons owner-id ids))))
+
+(defn update-where [resource where row]
+  (check-fields resource (keys row))
+  (check-fields resource (keys where))
+  (let [fields (remove #(= % (:identity resource)) (write-columns resource row))
+        bump   (str (quoted version-column) " = " (quoted version-column) " + 1")
+        clause (where-clause resource where)]
+    (into [(str "UPDATE " (quoted (:table resource)) " SET "
+                (str/join ", " (conj (mapv #(str (quoted (get-in resource [:fields % :column])) " = ?")
+                                           fields)
+                                     bump))
+                (:sql clause))]
+          (concat (map #(get row %) fields) (:params clause)))))

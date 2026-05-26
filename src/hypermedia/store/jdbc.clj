@@ -82,55 +82,47 @@
     (jdbc/execute! datasource (sql/insert resource (encode-row dialect resource row)))
     (store/fetch this resource (get row (:identity resource))))
   (replace! [this resource id row expected]
-    (let [current (store/fetch this resource id)
-          key     (sql/encode dialect (type-of resource (:identity resource)) id)
-          blank   (zipmap (:field-order resource) (repeat nil))
-          stored  (assoc (merge blank row) (:identity resource) id)]
-      (cond
-        (nil? current)
-        (do (jdbc/execute! datasource (sql/insert resource (encode-row dialect resource stored)))
-            {:outcome :created :row (store/fetch this resource id)})
-
-        (and expected (not= expected (store/version-of current)))
-        {:outcome :stale}
-
-        :else
-        (attempt
-         (fn []
-           (if (pos? (changed (jdbc/execute! datasource
-                                             (sql/update-by-identity resource key
-                                                                     (encode-row dialect resource stored)
-                                                                     expected))))
-             {:outcome :written :row (store/fetch this resource id)}
+    (let [key    (sql/encode dialect (type-of resource (:identity resource)) id)
+          blank  (zipmap (:field-order resource) (repeat nil))
+          stored (assoc (merge blank row) (:identity resource) id)]
+      (attempt
+       (fn []
+         (if (pos? (changed (jdbc/execute! datasource
+                                           (sql/update-by-identity resource key
+                                                                   (encode-row dialect resource stored)
+                                                                   expected))))
+           {:outcome :written :row (store/fetch this resource id)}
+           (if (nil? (store/fetch this resource id))
+             (do (jdbc/execute! datasource (sql/insert resource (encode-row dialect resource stored)))
+                 {:outcome :created :row (store/fetch this resource id)})
              {:outcome :stale}))))))
   (amend! [this resource id row expected]
-    (let [current (store/fetch this resource id)
-          key     (sql/encode dialect (type-of resource (:identity resource)) id)
+    (let [key     (sql/encode dialect (type-of resource (:identity resource)) id)
           changes (dissoc row (:identity resource))]
-      (cond
-        (nil? current) {:outcome :absent}
-        (and expected (not= expected (store/version-of current))) {:outcome :stale}
-        :else
-        (attempt
-         (fn []
-           (if (pos? (changed (jdbc/execute! datasource
-                                             (sql/update-by-identity resource key
-                                                                     (encode-row dialect resource changes)
-                                                                     expected))))
-             {:outcome :written :row (store/fetch this resource id)}
+      (attempt
+       (fn []
+         (if (pos? (changed (jdbc/execute! datasource
+                                           (sql/update-by-identity resource key
+                                                                   (encode-row dialect resource changes)
+                                                                   expected))))
+           {:outcome :written :row (store/fetch this resource id)}
+           (if (nil? (store/fetch this resource id))
+             {:outcome :absent}
              {:outcome :stale}))))))
   (erase! [this resource id expected]
-    (let [current (store/fetch this resource id)
-          key     (sql/encode dialect (type-of resource (:identity resource)) id)]
-      (cond
-        (nil? current) {:outcome :absent}
-        (and expected (not= expected (store/version-of current))) {:outcome :stale}
-        :else
-        (attempt
-         (fn []
-           (if (pos? (changed (jdbc/execute! datasource (sql/delete-by-identity resource key expected))))
-             {:outcome :erased}
+    (let [key (sql/encode dialect (type-of resource (:identity resource)) id)]
+      (attempt
+       (fn []
+         (if (pos? (changed (jdbc/execute! datasource (sql/delete-by-identity resource key expected))))
+           {:outcome :erased}
+           (if (nil? (store/fetch this resource id))
+             {:outcome :absent}
              {:outcome :stale}))))))
+  (amend-where! [_ resource where row]
+    (changed (jdbc/execute! datasource
+                            (sql/update-where resource
+                                              (encode-row dialect resource where)
+                                              (encode-row dialect resource row)))))
   (transact [this body]
     (jdbc/with-transaction [tx datasource]
       (body (assoc this :datasource tx))))
@@ -158,11 +150,12 @@
                            (sql/select-join relation (map #(sql/encode dialect owner-type %) owner-ids))
                            options))))
   (link! [_ owner target relation owner-id target-ids]
-    (let [key (sql/encode dialect (type-of owner (:identity owner)) owner-id)]
-      (doseq [target-id target-ids]
-        (jdbc/execute! datasource
-                       (sql/insert-join relation key
-                                        (sql/encode dialect (type-of target (:identity target)) target-id))))
+    (let [key    (sql/encode dialect (type-of owner (:identity owner)) owner-id)
+          groups (mapv (fn [target-id]
+                         [key (sql/encode dialect (type-of target (:identity target)) target-id)])
+                       target-ids)]
+      (when (seq groups)
+        (jdbc/execute-batch! datasource (first (sql/insert-join relation nil nil)) groups {}))
       (count target-ids)))
   (unlink! [_ owner target relation owner-id target-ids]
     (let [key (sql/encode dialect (type-of owner (:identity owner)) owner-id)

@@ -9,6 +9,7 @@
   (replace! [this resource id row expected])
   (amend! [this resource id row expected])
   (erase! [this resource id expected])
+  (amend-where! [this resource where row])
   (transact [this body])
   (linked [this owner target relation owner-id criteria])
   (linked-total [this owner target relation owner-id])

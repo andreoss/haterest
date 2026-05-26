@@ -135,3 +135,12 @@
 (deftest reads-a-large-object-as-a-value
   (is (= "text" (sql/decode :h2 :text "text")))
   (is (= "text" (sql/decode :h2 :string "text"))))
+
+(deftest builds-a-bulk-update
+  (let [book (get-in model [:resources :book])]
+    (is (= ["UPDATE \"books\" SET \"author_id\" = ?, \"row_version\" = \"row_version\" + 1 WHERE \"author_id\" = ?"
+            nil 1]
+           (sql/update-where book {:author-id 1} {:author-id nil})))
+    (is (= ["UPDATE \"books\" SET \"author_id\" = ?, \"row_version\" = \"row_version\" + 1 WHERE \"id\" IN (?, ?)"
+            7 1 2]
+           (sql/update-where book {:id #{1 2}} {:author-id 7})))))
