@@ -28,6 +28,9 @@
 (defn- embedded [name url]
   {:name name :url url :stop (fn [])})
 
+(defn- usable? [engine]
+  (and engine (reachable? (:url engine))))
+
 (defn h2 [] (embedded :h2 (str "jdbc:h2:mem:" (unique "e2e") ";DB_CLOSE_DELAY=-1")))
 
 (defn sqlite []
@@ -109,10 +112,14 @@
     (reduce (fn [acc [label build]]
               (if (and selected (not (contains? selected label)))
                 (update acc :declined conj [label "not selected"])
-                (if-let [engine (try (build) (catch Exception e
-                                               (.println System/err (str "engine " label " refused: " (.getMessage e)))
-                                               nil))]
-                  (update acc :ready conj engine)
-                  (update acc :declined conj [label "unavailable"]))))
+                (let [engine (try (build)
+                                  (catch Exception e
+                                    (.println System/err
+                                              (str "engine " label " refused: " (.getMessage e)))
+                                    nil))]
+                  (if (usable? engine)
+                    (update acc :ready conj engine)
+                    (do (some-> engine :stop (apply []))
+                        (update acc :declined conj [label "unavailable"]))))))
             {:ready [] :declined []}
             builders)))

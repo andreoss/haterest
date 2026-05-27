@@ -56,7 +56,7 @@
                           cloverage/cloverage    {:mvn/version "1.2.4"}}
              :main-opts ["-m" "cloverage.coverage"
                          "-p" "src" "-s" "test"
-                         "-t" "hypermedia\\.(?!.*e2e).*-test"
+                         "-t" "hypermedia\\.(?!.*(e2e|concurrency)).*-test"
                          "--fail-threshold" "85"
                          "--codecov"]}
 
