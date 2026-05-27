@@ -70,7 +70,7 @@
   (str (:path resource) "/{" (name (:identity resource)) "}"))
 
 (defn- self-href [resource row]
-  (uri/expand (self-template resource) {(:identity resource) (get row (:identity resource))}))
+  (uri/render (:self-parts resource) {(:identity resource) (get row (:identity resource))}))
 
 (defn- profile-href [resource]
   (str "/profile/" (name (:collection resource))))
@@ -87,22 +87,20 @@
                                      m
                                      (assoc m k (get row k))))
                          {} shown)
-         links   (cond-> (into {:self    (hal/link (uri/expand (:self-template resource) binding))
-                                :profile (hal/link (:profile-path resource))}
+         self    (uri/render (:self-parts resource) binding)
+         links   (cond-> (into {:self    (hal/href self)
+                                :profile (hal/href (:profile-path resource))}
                                (for [[k relation] (:relations resource)]
-                                 [(rel/curied curie k) (hal/link (uri/expand (:path relation) binding))]))
+                                 [(rel/curied curie k) (hal/href (uri/render (:parts relation) binding))]))
                    (seq (:projections resource))
                    (assoc (rel/curied curie :projection)
-                          (hal/link (str (uri/expand (:self-template resource) binding) "{?projection}"))))
+                          (assoc (hal/href (str self "{?projection}")) :templated true)))
          nested  (into {}
                        (for [[k {:keys [kind target index]}] embeds
                              :let [relation (get-in resource [:relations k])
                                    value    (if (= :belongs-to kind)
-                                              (some->> (get row (:via relation))
-                                                       (get index)
-                                                       (item-doc model target))
-                                              (mapv #(item-doc model target %)
-                                                    (get index (get row (:identity resource)) [])))]
+                                              (get index (get row (:via relation)))
+                                              (get index (get row (:identity resource)) []))]
                              :when (some? value)]
                          [k value]))]
      (hal/document props links nested))))
@@ -116,14 +114,15 @@
   (into {}
         (for [relation (embedded-relations resource projection)
               :let [k      (:name relation)
-                    target (get-in model [:resources (:target relation)])]]
+                    target (get-in model [:resources (:target relation)])
+                    render (fn [target-row] (item-doc model target target-row))]]
           [k (case (:kind relation)
                :belongs-to
                (let [ids (into #{} (keep #(get % (:via relation))) rows)]
                  {:kind   :belongs-to
                   :target target
                   :index  (if (seq ids)
-                            (into {} (map (juxt (:identity target) identity))
+                            (into {} (map (juxt (:identity target) render))
                                   (store/query store target {:where {(:identity target) ids}}))
                             {})})
 
@@ -133,7 +132,7 @@
                               (store/links-of store resource target relation owners)
                               [])
                      found  (if (seq pairs)
-                              (into {} (map (juxt (:identity target) identity))
+                              (into {} (map (juxt (:identity target) render))
                                     (store/query store target
                                                  {:where {(:identity target) (into #{} (map second) pairs)}}))
                               {})]
@@ -149,8 +148,10 @@
                  {:kind   :has-many
                   :target target
                   :index  (if (seq ids)
-                            (group-by #(get % (:via relation))
-                                      (store/query store target {:where {(:via relation) ids}}))
+                            (update-vals (group-by #(get % (:via relation))
+                                                   (store/query store target
+                                                                {:where {(:via relation) ids}}))
+                                         #(mapv render %))
                             {})}))])))
 
 (defn- searches-link [model resource]
@@ -258,6 +259,7 @@
   (let [header (get-in request [:headers "if-match"])]
     (cond
       (str/blank? header) {:expected (store/version-of current)}
+      (nil? current)      {:unmatchable true}
       (etag/matches? header (store/version-of current)) {:expected (store/version-of current)}
       :else {:unmatchable true})))
 
@@ -355,7 +357,7 @@
   (let [target (get-in model [:resources (:target relation)])
         id     (identity-of resource request)
         row    (some->> id (store/fetch store resource))
-        self   (uri/expand (:path relation) {(:identity resource) id})]
+        self   (uri/render (:parts relation) {(:identity resource) id})]
     (cond
       (nil? row) (missing request)
       (= :many-to-many (:kind relation))
@@ -372,9 +374,7 @@
                         (fn [tx]
                           (let [stored (store/create! tx resource row)]
                             (document resource :item (single-doc model tx resource stored nil) 201
-                                      {"Location" (uri/expand (:self-template resource)
-                                                              {(:identity resource)
-                                                               (get stored (:identity resource))})
+                                      {"Location" (self-href resource stored)
                                        "ETag"     (etag/of (store/version-of stored))})))))))
 
 (defn- handle-replace [model store resource request]
@@ -397,7 +397,7 @@
                  (document resource :item
                            (single-doc model tx resource (:row written) nil)
                            (if (= :created (:outcome written)) 201 200)
-                           {"Location" (uri/expand (:self-template resource) {(:identity resource) id})
+                           {"Location" (uri/render (:self-parts resource) {(:identity resource) id})
                             "ETag"     (etag/of (store/version-of (:row written)))}))))))))))
 
 (defn- handle-amend [model store resource request]
@@ -451,22 +451,22 @@
       unmatchable    {:outcome :stale}
       :else          (store/amend! store resource id {} expected))))
 
-(defn- bind-one [store target ids owner-id via]
-  (doseq [id ids] (store/amend! store target id {via owner-id} nil)))
+(defn- all-present? [store target ids]
+  (or (empty? ids)
+      (= (count ids)
+         (count (store/query store target {:where {(:identity target) (set ids)}})))))
 
 (defn- handle-bind [model store resource relation request]
   (let [target (get-in model [:resources (:target relation)])
         id     (identity-of resource request)
-        owner  (some->> id (store/fetch store resource))
         {:keys [ids problem]} (referenced target request)]
     (cond
-      (nil? owner) (missing request)
-      problem      problem
+      problem problem
 
       (and (= :belongs-to (:kind relation)) (not= 1 (count ids)))
       (problem/of 422 "this relation holds one resource" {:instance (:uri request)})
 
-      (not (every? #(some? (store/fetch store target %)) ids))
+      (not (all-present? store target ids))
       (problem/of 422 "the referenced resource does not exist" {:instance (:uri request)})
 
       :else
@@ -491,10 +491,10 @@
                    (store/link! tx resource target relation id (remove already ids))))
                (when (= :has-many (:kind relation))
                  (when (= :put (:request-method request))
-                   (doseq [row   (store/query tx target {:where {(:via relation) id}})
-                           :when (not (contains? (set ids) (get row (:identity target))))]
-                     (store/amend! tx target (get row (:identity target)) {(:via relation) nil} nil)))
-                 (bind-one tx target ids id (:via relation)))
+                   (store/amend-where! tx target {(:via relation) id} {(:via relation) nil}))
+                 (when (seq ids)
+                   (store/amend-where! tx target {(:identity target) (set ids)}
+                                       {(:via relation) id})))
                no-content))))))))
 
 (defn- handle-unbind [model store resource relation request]
@@ -545,7 +545,7 @@
            (case (:outcome claimed)
              :absent            (missing request)
              (:stale :conflict) (refused request)
-             (do (store/amend! tx target member {(:via relation) nil} nil)
+             (do (store/amend-where! tx target {(:identity target) member} {(:via relation) nil})
                  no-content)))))
 
       :else (missing request))))
