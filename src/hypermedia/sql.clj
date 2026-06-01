@@ -115,9 +115,12 @@
 
 (declare join-tables)
 
+(declare indexes)
+
 (defn ddl [model dialect]
-  (into (mapv #(create-table model dialect (get-in model [:resources %])) (creation-order model))
-        (join-tables model dialect)))
+  (-> (mapv #(create-table model dialect (get-in model [:resources %])) (creation-order model))
+      (into (join-tables model dialect))
+      (into (indexes model dialect))))
 
 (defn projection [resource]
   (str "SELECT " (str/join ", " (map quoted (conj (columns-of resource) version-column)))
@@ -378,3 +381,53 @@
                                      bump))
                 (:sql clause))]
           (concat (map #(get row %) fields) (:params clause)))))
+
+(defn- column-of [resource field]
+  (get-in resource [:fields field :column]))
+
+(def ^:private indexes-its-foreign-keys #{:h2 :mysql :derby :hsqldb})
+
+(defn indexes-foreign-keys? [dialect]
+  (contains? indexes-its-foreign-keys dialect))
+
+(defn indexed-columns [model dialect]
+  (reduce
+   (fn [acc k]
+     (let [resource (get-in model [:resources k])
+           table    (:table resource)
+           identity (column-of resource (:identity resource))
+           mine     (concat
+                     (for [f (:field-order resource)
+                           :when (get-in resource [:fields f :indexed?])]
+                       [table (column-of resource f)])
+                     (when-not (indexes-foreign-keys? dialect)
+                       (for [[_ relation] (:relations resource)
+                             :when (= :belongs-to (:kind relation))]
+                         [table (column-of resource (:via relation))]))
+                     (for [[_ search] (:searches resource)
+                           f (:predicates search)]
+                       [table (column-of resource f)])
+                     (when-not (indexes-foreign-keys? dialect)
+                       (for [[_ relation] (:relations resource)
+                             :when (= :has-many (:kind relation))
+                             :let [target (get-in model [:resources (:target relation)])]
+                             :when target]
+                         [(:table target) (column-of target (:via relation))]))
+                     (for [[_ relation] (:relations resource)
+                           :when (= :many-to-many (:kind relation))]
+                       [(get-in relation [:join :table])
+                        (get-in relation [:join :target-via-column])]))]
+       (reduce (fn [m [t c]]
+                 (if (and c (not (and (= t table) (= c identity))))
+                   (update m t (fnil conj (sorted-set)) c)
+                   m))
+               acc mine)))
+   {}
+   (:order model)))
+
+(defn indexes [model dialect]
+  (vec (for [[table columns] (sort-by key (indexed-columns model dialect))
+             column columns]
+         (str "CREATE INDEX " (when-not (creates-only-once? dialect) "IF NOT EXISTS ")
+              (quoted (str "ix_" (name table) "_" (name column)))
+              " ON " (quoted table) " (" (quoted column) ")"))))

@@ -20,6 +20,7 @@
 (def Field
   [:map
    [:type :keyword]
+   [:indexed {:optional true} :boolean]
    [:generated {:optional true} :boolean]
    [:identity {:optional true} :boolean]
    [:required {:optional true} :boolean]
@@ -81,9 +82,10 @@
          (assoc :name k
                 :column (or (:column spec) (column k))
                 :identity? (= k id)
+                :indexed? (boolean (:indexed spec))
                 :generated? (boolean (:generated spec))
                 :required? (boolean (or (:required spec) (= k id))))
-         (dissoc :identity :required :generated))])
+         (dissoc :identity :required :generated :indexed))])
 
 (defn- normalise-relation [path id [k spec]]
   (let [self (str path "/{" (name id) "}/" (name k))]

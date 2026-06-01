@@ -144,3 +144,48 @@
     (is (= ["UPDATE \"books\" SET \"author_id\" = ?, \"row_version\" = \"row_version\" + 1 WHERE \"id\" IN (?, ?)"
             7 1 2]
            (sql/update-where book {:id #{1 2}} {:author-id 7})))))
+
+(def searchable
+  (schema/parse
+   {:resources
+    {:author {:fields   {:id {:type :long :identity true} :name {:type :string}}
+              :searches {:by-name {:predicates [:name]}}
+              :relations {:books {:kind :has-many :target :book :via :author-id}}}
+     :book   {:fields      {:id        {:type :long :identity true}
+                            :title     {:type :string}
+                            :year      {:type :long :indexed true}
+                            :author-id {:type :long}}
+              :relations   {:author {:kind :belongs-to :target :author :via :author-id}}
+              :searches    {:by-title {:predicates [:title]}}}}}))
+
+(deftest indexes-what-the-schema-says-it-filters-on
+  (let [columns (sql/indexed-columns searchable :postgres)]
+    (is (= #{:name} (get columns :authors)))
+    (is (= #{:author_id :title :year} (get columns :books)))))
+
+(deftest a-foreign-key-is-left-to-an-engine-that-indexes-it
+  (is (= #{:title :year} (get (sql/indexed-columns searchable :h2) :books)))
+  (is (contains? (get (sql/indexed-columns searchable :sqlite) :books) :author_id)))
+
+(deftest an-identity-is-not-indexed-twice
+  (is (not (contains? (get (sql/indexed-columns searchable :postgres) :books) :id))))
+
+(deftest indexes-are-named-for-what-they-cover
+  (let [statements (sql/indexes searchable :h2)]
+    (is (= 3 (count statements)))
+    (is (some #(= "CREATE INDEX IF NOT EXISTS \"ix_books_title\" ON \"books\" (\"title\")" %) statements))
+    (is (some #(= "CREATE INDEX IF NOT EXISTS \"ix_books_author_id\" ON \"books\" (\"author_id\")" %)
+              (sql/indexes searchable :postgres)))
+    (is (every? #(str/starts-with? % "CREATE INDEX") statements))))
+
+(deftest a-dialect-without-the-clause-states-the-index-plainly
+  (is (every? #(str/starts-with? % "CREATE INDEX \"ix_") (sql/indexes searchable :derby))))
+
+(deftest a-join-is-indexed-in-both-directions
+  (let [model (schema/parse
+               {:resources
+                {:a {:fields {:id {:type :long :identity true}}
+                     :relations {:bs {:kind :many-to-many :target :b :through :ab
+                                      :via :a-id :target-via :b-id}}}
+                 :b {:fields {:id {:type :long :identity true}}}}})]
+    (is (= #{:b_id} (get (sql/indexed-columns model :h2) :ab)))))

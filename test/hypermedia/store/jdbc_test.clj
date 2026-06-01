@@ -154,14 +154,15 @@
 (deftest derives-one-join-table-for-both-sides
   (let [statements (sql/ddl joined :h2)
         join       (first (filter #(str/includes? % "\"authorship\"") statements))]
-    (is (= 3 (count statements)))
+    (is (= 5 (count statements)))
     (is (= (count statements) (count (distinct statements))))
     (is (str/includes? join "\"author_id\" BIGINT NOT NULL"))
     (is (str/includes? join "\"book_id\" BIGINT NOT NULL"))
     (is (str/includes? join "PRIMARY KEY (\"author_id\", \"book_id\")"))
     (is (str/includes? join "FOREIGN KEY (\"author_id\") REFERENCES \"authors\" (\"id\")"))
     (is (str/includes? join "FOREIGN KEY (\"book_id\") REFERENCES \"books\" (\"id\")"))
-    (is (= (last statements) join))))
+    (is (= join (nth statements 2)))
+    (is (str/starts-with? (last statements) "CREATE INDEX"))))
 
 (defn- with-join [url check]
   (.mkdirs (io/file "scratch"))
@@ -230,3 +231,12 @@
         (finally
           (jdbc-store/close opened)
           (io/delete-file (second (re-find #"^jdbc:sqlite:(.+)$" url)) true))))))
+
+(deftest a-pool-takes-the-size-it-is-given
+  (let [url    (str "jdbc:h2:mem:" (gensym "store") ";DB_CLOSE_DELAY=-1")
+        opened (jdbc-store/open {:url url :model model :migrate? true :pool {:size 3}})]
+    (try
+      (is (= 3 (.getMaximumPoolSize (.getHikariConfigMXBean ^com.zaxxer.hikari.HikariDataSource
+                                                            (:datasource opened)))))
+      (is (true? (store/probe opened)))
+      (finally (jdbc-store/close opened)))))

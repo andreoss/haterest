@@ -174,16 +174,18 @@
   (doseq [statement (sql/ddl model dialect)]
     (try (jdbc/execute! datasource [statement])
          (catch Exception e
-           (when-not (and (sql/creates-only-once? dialect) (already-there? e))
-             (throw e))))))
+           (when-not (already-there? e) (throw e))))))
 
-(defn open [{:keys [url model migrate? statements]}]
+(defn open [{:keys [url model migrate? statements pool]}]
   (let [dialect    (sql/dialect url)
         datasource (connection/->pool HikariDataSource
                                       (cond-> {:jdbcUrl url}
                                         (= :sqlite dialect) (assoc :maximumPoolSize 1)
                                         (sql/session-setup dialect)
-                                        (assoc :connectionInitSql (sql/session-setup dialect))))]
+                                        (assoc :connectionInitSql (sql/session-setup dialect))
+                                        (:size pool)     (assoc :maximumPoolSize (:size pool))
+                                        (:idle pool)     (assoc :minimumIdle (:idle pool))
+                                        (:timeout pool)  (assoc :connectionTimeout (:timeout pool))))]
     (when migrate? (migrate! datasource model dialect))
     (->Jdbc datasource model dialect (or statements (sql/statements model)))))
 
