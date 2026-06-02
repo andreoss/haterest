@@ -62,3 +62,9 @@
    (fn [running]
      (main/detach running)
      (is (= 503 (:status (request (:port running) :get "/health")))))))
+
+(deftest the-pool-is-an-operator-decision
+  (let [options (main/options ["-s" "a" "-d" "b" "-c" "24" "--connection-timeout" "2000"])]
+    (is (= 24 (:connections options)))
+    (is (= 2000 (:connection-timeout options))))
+  (is (nil? (:connections (main/options ["-s" "a" "-d" "b"])))))

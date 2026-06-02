@@ -12,6 +12,8 @@
    ["-d" "--database URL" "jdbc url"]
    ["-p" "--port PORT" "port to bind, zero for any" :default 8080 :parse-fn parse-long]
    ["-h" "--host HOST" "address to bind" :default "127.0.0.1"]
+   ["-c" "--connections SIZE" "most connections to hold open" :parse-fn parse-long]
+   [nil "--connection-timeout MS" "how long to wait for one" :parse-fn parse-long]
    [nil "--migrate" "derive and apply the schema before serving" :default false]
    [nil "--help"]])
 
@@ -24,10 +26,11 @@
     (str/blank? (:schema options))   (conj "a schema is required")
     (str/blank? (:database options)) (conj "a database url is required")))
 
-(defn start [{:keys [schema database port host migrate]}]
+(defn start [{:keys [schema database port host migrate connections connection-timeout]}]
   (let [api   (config/api schema)
         store (jdbc-store/open {:url database :model (:model api)
                                 :statements (:statements api)
+                                :pool {:size connections :timeout connection-timeout}
                                 :migrate? (boolean migrate)})
         running (server/start (api/handler api store) {:port (or port 8080)
                                                        :host (or host "127.0.0.1")})]
