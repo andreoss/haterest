@@ -292,7 +292,11 @@
                   {:instance (:uri request) :errors (:errors pageable)})
       :else
       (let [rows  (rows-of pageable)
-            total (total-of)
+            known (count rows)
+            total (if (and (< known (:size pageable))
+                           (or (pos? known) (zero? (:number pageable))))
+                    (+ (* (:number pageable) (:size pageable)) known)
+                    (total-of))
             doc   (collection-doc model store resource rows base pageable total projection)
             extra (query-suffix request)]
         (document resource :collection

@@ -77,11 +77,11 @@
   (with-api
    (fn [{:keys [writers] :as running}]
      (testing "a collection does not pay per row"
-       (is (= (statements running :get "/works?size=1")
-              (statements running :get "/works?size=60"))))
+       (is (>= (statements running :get "/works?size=1")
+               (statements running :get "/works?size=60"))))
      (testing "an association does not pay per row"
-       (is (= (statements running :get (str "/writers/" (first writers) "/works?size=1"))
-              (statements running :get (str "/writers/" (first writers) "/works?size=60")))))
+       (is (>= (statements running :get (str "/writers/" (first writers) "/works?size=1"))
+               (statements running :get (str "/writers/" (first writers) "/works?size=60")))))
      (testing "a reference list does not pay per reference"
        (let [one  (statements running :put (str "/writers/" (first writers) "/works")
                               (str "/works/" (first (:works running))) "text/uri-list")
@@ -132,3 +132,17 @@
        (testing "a page embedding a membership does not pay per owner"
          (is (= (statements running :get "/players?size=1")
                 (statements running :get "/players?size=4"))))))))
+
+(deftest a-page-that-tells-its-own-total-does-not-ask-for-one
+  (with-api
+   (fn [{:keys [writers] :as running}]
+     (testing "a page that is not full states the total it already knows"
+       (is (>= 2 (statements running :get "/works?size=100")))
+       (is (>= 2 (statements running :get "/works?size=50&page=1"))))
+     (testing "a full page still asks"
+       (is (>= 3 (statements running :get "/works?size=20&page=0"))))
+     (testing "a page past the end still asks, because it knows nothing"
+       (is (>= 3 (statements running :get "/works?size=20&page=50"))))
+     (testing "an association that fits in one page does not ask for a total"
+       (is (> (statements running :get (str "/writers/" (last writers) "/works?size=1"))
+              (statements running :get (str "/writers/" (last writers) "/works?size=20"))))))))  
