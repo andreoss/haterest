@@ -1,0 +1,201 @@
+= A hypermedia API derived from a schema
+
+One EDN file names the resources, their fields and how they relate. The tables,
+the indexes, the routes, the links and the documents are derived from it and
+served over JDBC. Nothing is written per resource.
+
+== Run it
+
+[source,shell]
+----
+clojure -M:run -s example.edn -d 'jdbc:h2:mem:demo;DB_CLOSE_DELAY=-1' -p 8181 --migrate
+export BASE=http://127.0.0.1:8181
+----
+
+== The schema it serves
+
+.resources/example.edn
+[source,clojure]
+----
+{:curie "rel"
+ :resources
+ {:author {:fields    {:id   {:type :uuid :identity true :generated true}
+                       :name {:type :string :required true}}
+           :relations {:books {:kind :has-many :target :book :via :author-id}}
+           :searches  {:by-name {:predicates [:name]}}}
+  :book   {:fields      {:id        {:type :uuid :identity true :generated true}
+                         :title     {:type :string :required true}
+                         :year      {:type :long}
+                         :author-id {:type :uuid}}
+           :relations   {:author {:kind :belongs-to :target :author :via :author-id :embed true}}
+           :projections {:summary {:fields [:title]}
+                         :full    {:fields [:title :year] :embed [:author]}}
+           :searches    {:by-title {:predicates [:title]}
+                         :by-year  {:predicates [:year]}}}}}
+----
+
+== Walk it
+
+Everything below runs as written; generated ids will differ. Start at the root:
+every collection is linked, and the relations the platform invents are curied
+to the profile that describes them.
+
+[source,shell]
+----
+curl -s $BASE/ | jq -c ._links
+----
+[source,json]
+----
+{"self":{"href":"/"},"profile":{"href":"/profile"},"rel:health":{"href":"/health"},
+ "rel:authors":{"href":"/authors"},"rel:books":{"href":"/books"},
+ "curies":[{"name":"rel","href":"/profile/{rel}","templated":true}]}
+----
+
+Create an author and keep the link it answers with.
+
+[source,shell]
+----
+AUTHOR=$(curl -s -D- -o /dev/null -X POST $BASE/authors \
+  -H 'Content-Type: application/json' -d '{"name":"Ursula Le Guin"}' \
+  | awk '/^[Ll]ocation:/{print $2}' | tr -d '\r')
+----
+
+Create a book against it. A client writes what it read: the relation takes the
+link, not the key. `author` is declared `:embed`, so it comes back embedded.
+
+[source,shell]
+----
+curl -s -X POST $BASE/books -H 'Content-Type: application/json' \
+  -d "{\"title\":\"A Wizard of Earthsea\",\"year\":1968,\"author\":\"$AUTHOR\"}" \
+  | jq -c '{title, author: ._embedded.author.name, self: ._links.self.href}'
+----
+[source,json]
+----
+{"title":"A Wizard of Earthsea","author":"Ursula Le Guin","self":"/books/bd28f25f-d311-4660-b1ba-2a5aca9a41e6"}
+----
+
+Two more, so there is something to page through.
+
+[source,shell]
+----
+curl -s -o /dev/null -X POST $BASE/books -H 'Content-Type: application/json' \
+  -d "{\"title\":\"The Tombs of Atuan\",\"year\":1971,\"author\":\"$AUTHOR\"}"
+curl -s -o /dev/null -X POST $BASE/books -H 'Content-Type: application/json' \
+  -d "{\"title\":\"The Farthest Shore\",\"year\":1972,\"author\":\"$AUTHOR\"}"
+----
+
+A collection is a slice. `next` is a link to follow, not a URL to build.
+
+[source,shell]
+----
+curl -s "$BASE/books?size=2&sort=title,asc" \
+  | jq -c '{page, titles: [._embedded.books[].title], next: ._links.next.href}'
+----
+[source,json]
+----
+{"page":{"size":2,"totalElements":3,"totalPages":2,"number":0},
+ "titles":["A Wizard of Earthsea","The Farthest Shore"],
+ "next":"/books?page=1&size=2&sort=title%2Casc"}
+----
+
+A declared search is a resource, and so is a relation.
+
+[source,shell]
+----
+curl -s "$BASE/books/search/by-year?year=1971" | jq -c '[._embedded.books[].title]'
+curl -s "$BASE$AUTHOR/books"                   | jq -c '[._embedded.books[].title]'
+----
+[source,json]
+----
+["The Tombs of Atuan"]
+["A Wizard of Earthsea","The Tombs of Atuan","The Farthest Shore"]
+----
+
+A read carries an `ETag`. A write naming it is admitted once; the same tag a
+second time has gone stale and is refused rather than merged.
+
+[source,shell]
+----
+BOOK=$(curl -s "$BASE/books?size=1&sort=title,asc" | jq -r '._embedded.books[0]._links.self.href')
+ETAG=$(curl -s -D- -o /dev/null "$BASE$BOOK" | awk '/^ETag:/{print $2}' | tr -d '\r')
+curl -s -o /dev/null -w '%{http_code}\n' -X PATCH "$BASE$BOOK" \
+  -H 'Content-Type: application/json' -H "If-Match: $ETAG" -d '{"year":1969}'
+curl -s -o /dev/null -w '%{http_code}\n' -X PATCH "$BASE$BOOK" \
+  -H 'Content-Type: application/json' -H "If-Match: $ETAG" -d '{"year":1970}'
+----
+----
+200
+412
+----
+
+A submission that does not fit the schema is a problem document.
+
+[source,shell]
+----
+curl -s -X POST $BASE/books -H 'Content-Type: application/json' -d '{"year":1968}' | jq -c .
+----
+[source,json]
+----
+{"type":"about:blank","title":"the submission does not fit the schema","status":422,
+ "instance":"/books","errors":[{"field":"title","error":"missing"}]}
+----
+
+Also served: `/health` reports the store rather than its own handle;
+`/profile/books` is an ALPS descriptor; `Accept: application/prs.hal-forms+json`
+adds `_templates` stating what may be written; `OPTIONS` answers `Allow`;
+`?projection=summary` narrows a document to what the schema declared.
+
+== The schema language
+
+[cols="1,3"]
+|===
+| key | what it holds
+
+| `:fields`
+| name -> `{:type :identity :generated :required :indexed :column}`
+
+| `:relations`
+| name -> `{:kind :target :via :through :target-via :embed}`
+
+| `:projections`
+| name -> `{:fields :embed}`, chosen with `?projection=`
+
+| `:searches`
+| name -> `{:predicates}`, served under `/<collection>/search/`
+
+| `:collection` `:table`
+| override the names derived from the resource key
+
+| `:curie`
+| prefix for invented relations, or `false` to decline it
+|===
+
+Field types: `:uuid :string :text :long :double :decimal :boolean :instant :date`.
+Relation kinds: `:belongs-to :has-one :has-many :many-to-many`; the last needs
+`:through` and `:target-via`. The columns a schema searches, sorts or follows
+are indexed when the tables are derived.
+
+A schema is read at boot from a file or the classpath. It can instead be
+expanded at compile time, which makes the model, the routes and the statements
+constants, and turns an invalid schema into a build failure:
+
+[source,clojure]
+----
+(hypermedia.api/defapi shop {:resources {...}})
+----
+
+== Engines
+
+The JDBC url picks the engine: H2, PostgreSQL, MariaDB or MySQL, HSQLDB, Derby,
+SQLite. Types, paging syntax, identifier quoting and the values a driver will
+accept differ per engine and are handled per engine. The same scenarios run end
+to end against all six.
+
+== Tests
+
+[source,shell]
+----
+clojure -M:test :unit   # unit, budgets, regression
+clojure -M:test:e2e     # every engine it can reach, named in the output
+clojure -M:coverage     # fails under 85%
+----
