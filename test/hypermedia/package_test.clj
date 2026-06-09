@@ -9,14 +9,14 @@
 (def ^:private listening #"listening on http://([^:]+):(\d+)")
 
 (defn- built []
-  (->> (.listFiles (io/file "target"))
-       (filter #(str/ends-with? (.getName ^java.io.File %) "-standalone.jar"))
+  (->> (file-seq (io/file "target"))
+       (filter #(str/ends-with? (.getName ^java.io.File %) "standalone.jar"))
        first))
 
 (defn- artefact []
   (or (built)
       (do (.println System/err "package: no jar yet, building one")
-          (shell/sh "clojure" "-T:build" "uberjar")
+          (shell/sh "lein" "uberjar")
           (built))))
 
 (defn- announced [^java.io.BufferedReader reader deadline]

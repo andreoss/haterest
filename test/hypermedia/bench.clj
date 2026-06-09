@@ -91,9 +91,6 @@
            (measure "profile" runs #(get-in-api handler "/profile/works"))]))
        (finally (jdbc-store/close opened) ((:stop engine)))))))
 
-(defn -main [& args]
-  (run (Long/parseLong (or (first args) "5000"))
-       (Long/parseLong (or (second args) "200"))))
 
 (defn- batch-insert [opened resource rows]
   (let [[statement] (hypermedia.sql/insert resource (first rows))
@@ -203,3 +200,12 @@
                            (fn [i] (get-in-api handler (str "/works?size=20&page=" (mod i pages)))))
                    :label "page of 20"))))
        (finally (jdbc-store/close opened) ((:stop engine)))))))
+
+(defn -main [& args]
+  (let [[what & numbers] args
+        [a b] (map #(Long/parseLong %) numbers)]
+    (case (or what "run")
+      "run"   (run (or a 5000) (or b 200))
+      "scale" (scale (or a 100000) (or b 400))
+      "load"  (under-load (or a 20000) (or b 2))
+      (println "run | scale | load"))))
