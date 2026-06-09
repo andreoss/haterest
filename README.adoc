@@ -184,6 +184,18 @@ constants, and turns an invalid schema into a build failure:
 (hypermedia.api/defapi shop {:resources {...}})
 ----
 
+== Package it
+
+[source,shell]
+----
+clojure -T:build uberjar
+java -jar target/hypermedia-0.1.0-standalone.jar \
+  -s example.edn -d 'jdbc:h2:mem:demo;DB_CLOSE_DELAY=-1' -p 8181 --migrate
+----
+
+The jar carries every engine below, so it needs nothing but a JVM. A schema is
+read from the filesystem if it is there and from the jar if it is not.
+
 == Engines
 
 The JDBC url picks the engine: H2, PostgreSQL, MariaDB or MySQL, HSQLDB, Derby,
@@ -198,4 +210,5 @@ to end against all six.
 clojure -M:test :unit   # unit, budgets, regression
 clojure -M:test:e2e     # every engine it can reach, named in the output
 clojure -M:coverage     # fails under 85%
+clojure -T:build uberjar # the artefact, checked by the e2e suite
 ----
