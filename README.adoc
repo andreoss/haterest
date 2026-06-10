@@ -8,7 +8,7 @@ served over JDBC. Nothing is written per resource.
 
 [source,shell]
 ----
-clojure -M:run -s example.edn -d 'jdbc:h2:mem:demo;DB_CLOSE_DELAY=-1' -p 8181 --migrate
+lein serve -s example.edn -d 'jdbc:h2:mem:demo;DB_CLOSE_DELAY=-1' -p 8181 --migrate
 export BASE=http://127.0.0.1:8181
 ----
 
@@ -188,8 +188,8 @@ constants, and turns an invalid schema into a build failure:
 
 [source,shell]
 ----
-clojure -T:build uberjar
-java -jar target/hypermedia-0.1.0-standalone.jar \
+lein uberjar
+java -jar target/uberjar/hypermedia-standalone.jar \
   -s example.edn -d 'jdbc:h2:mem:demo;DB_CLOSE_DELAY=-1' -p 8181 --migrate
 ----
 
@@ -207,8 +207,8 @@ to end against all six.
 
 [source,shell]
 ----
-clojure -M:test :unit   # unit, budgets, regression
-clojure -M:test:e2e     # every engine it can reach, named in the output
-clojure -M:coverage     # fails under 85%
-clojure -T:build uberjar # the artefact, checked by the e2e suite
+lein test      # unit, budgets, regression
+lein e2e       # every engine it can reach, named in the output
+lein cover     # coverage, fails under 85%
+lein uberjar   # the artefact, checked by the e2e suite
 ----
