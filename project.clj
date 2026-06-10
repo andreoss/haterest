@@ -28,18 +28,25 @@
                              [org.mariadb.jdbc/mariadb-java-client "3.4.1"]
                              [org.slf4j/slf4j-nop "2.0.16"]]}
 
-   :harness  [:drivers {:dependencies [[lambdaisland/kaocha "1.91.1392"]]
-                        :source-paths ["test"]
-                        :jvm-opts ["-Djdk.httpclient.allowRestrictedHeaders=connection"]}]
+   :tests    {:source-paths ["test"]
+              :jvm-opts ["-Djdk.httpclient.allowRestrictedHeaders=connection"]}
 
-   :coverage [:drivers {:dependencies [[cloverage "1.2.4"]]
-                        :source-paths ["test"]
-                        :jvm-opts ["-Djdk.httpclient.allowRestrictedHeaders=connection"]}]
+   :kaocha   {:dependencies [[lambdaisland/kaocha "1.91.1392"]]}
 
-   :dev      [:drivers {:source-paths ["dev" "test"]}]
+   :cover    {:dependencies [[cloverage "1.2.4"]]}
 
-   :uberjar  [:drivers {:aot [hypermedia.main]
-                        :uberjar-name "hypermedia-standalone.jar"}]}
+   :sources  {:source-paths ["dev" "test"]}
+
+   :compiled {:aot [hypermedia.main]
+              :uberjar-name "hypermedia-standalone.jar"}
+
+   :harness  [:drivers :tests :kaocha]
+
+   :coverage [:drivers :tests :cover]
+
+   :dev      [:drivers :sources]
+
+   :uberjar  [:drivers :compiled]}
 
   :aliases
   {"test"    ["with-profile" "+harness" "run" "-m" "kaocha.runner" ":unit"]
