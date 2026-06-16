@@ -5,6 +5,7 @@
             [hypermedia.api :as api]
             [hypermedia.config :as config]
             [hypermedia.server :as server]
+            [hypermedia.sql :as sql]
             [hypermedia.store.jdbc :as jdbc-store]))
 
 (def specification
@@ -15,6 +16,7 @@
    ["-c" "--connections SIZE" "most connections to hold open" :parse-fn parse-long]
    [nil "--connection-timeout MS" "how long to wait for one" :parse-fn parse-long]
    [nil "--migrate" "derive and apply the schema before serving" :default false]
+   [nil "--plan" "print what a migration would do, and do nothing" :default false]
    [nil "--help"]])
 
 (defn options [arguments]
@@ -25,6 +27,29 @@
   (cond-> (vec (:errors options))
     (str/blank? (:schema options))   (conj "a schema is required")
     (str/blank? (:database options)) (conj "a database url is required")))
+
+(defn evolution [{:keys [schema database]}]
+  (let [api   (config/api schema)
+        store (jdbc-store/open {:url database :model (:model api)})]
+    (try (jdbc-store/evolution (:datasource store) (:model api) (sql/dialect database))
+         (finally (jdbc-store/close store)))))
+
+(defn- type-name [code]
+  (try (str/lower-case (.getName (java.sql.JDBCType/valueOf (int code))))
+       (catch Exception _ (str code))))
+
+(defn report [{:keys [statements refusals notes]}]
+  (when (every? empty? [statements refusals notes])
+    (println "the store already matches the schema"))
+  (doseq [statement statements] (println statement))
+  (doseq [{:keys [table column reason]} notes]
+    (println (format "note: %s.%s %s" (name table) (name column) (name reason))))
+  (doseq [{:keys [table column reason declared found]} refusals]
+    (println (format "refused: %s.%s %s%s" (name table) (name column) (name reason)
+                     (if declared
+                       (format " (schema says %s, store holds %s)" (name declared) (type-name found))
+                       ""))))
+  (empty? refusals))
 
 (defn start [{:keys [schema database port host migrate connections connection-timeout]}]
   (let [api   (config/api schema)
@@ -48,7 +73,12 @@
     (cond
       (:help options) (println (:summary (cli/parse-opts arguments specification)))
       (seq (problems options)) (do (run! println (problems options)) (System/exit 2))
-      :else (let [running (start options)]
+      (:plan options) (System/exit (if (report (evolution options)) 0 3))
+      :else (let [running (try (start options)
+                               (catch clojure.lang.ExceptionInfo e
+                                 (if (= :hypermedia.store.jdbc/refused (:type (ex-data e)))
+                                   (do (report (ex-data e)) (System/exit 3))
+                                   (throw e))))]
               (.addShutdownHook (Runtime/getRuntime) (Thread. ^Runnable (:stop running)))
               (println (str "listening on http://" (:host running) ":" (:port running)))
               @(promise)))))
