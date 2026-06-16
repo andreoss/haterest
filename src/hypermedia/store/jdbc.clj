@@ -1,5 +1,6 @@
 (ns hypermedia.store.jdbc
   (:require [clojure.string :as str]
+            [hypermedia.evolve :as evolve]
             [hypermedia.sql :as sql]
             [hypermedia.store :as store]
             [next.jdbc :as jdbc]
@@ -170,11 +171,24 @@
     (or (str/includes? text "already exists")
         (str/includes? text "X0Y32"))))
 
-(defn migrate! [datasource model dialect]
-  (doseq [statement (sql/ddl model dialect)]
+(defn- apply-statements [datasource statements]
+  (doseq [statement statements]
     (try (jdbc/execute! datasource [statement])
          (catch Exception e
            (when-not (already-there? e) (throw e))))))
+
+(defn evolution [datasource model dialect]
+  (evolve/evolution datasource model dialect))
+
+(defn migrate! [datasource model dialect]
+  (let [{:keys [statements refusals notes]} (evolve/evolution datasource model dialect)]
+    (when (seq refusals)
+      (throw (ex-info "the store cannot be evolved to this schema"
+                      {:type ::refused :refusals refusals})))
+    (apply-statements datasource (sql/tables model dialect))
+    (apply-statements datasource statements)
+    (apply-statements datasource (sql/indexes model dialect))
+    notes))
 
 (defn open [{:keys [url model migrate? statements pool]}]
   (let [dialect    (sql/dialect url)

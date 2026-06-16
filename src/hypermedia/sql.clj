@@ -72,7 +72,7 @@
 (defn columns-of [resource]
   (mapv #(get-in resource [:fields % :column]) (:field-order resource)))
 
-(defn- column-clause [dialect resource field]
+(defn column-clause [dialect resource field]
   (let [spec (get-in resource [:fields field])]
     (str (quoted (:column spec)) " " (column-type dialect (:type spec))
          (when (:required? spec) " NOT NULL"))))
@@ -116,11 +116,14 @@
 (declare join-tables)
 
 (declare indexes)
+(declare join-tables)
+
+(defn tables [model dialect]
+  (into (mapv #(create-table model dialect (get-in model [:resources %])) (creation-order model))
+        (join-tables model dialect)))
 
 (defn ddl [model dialect]
-  (-> (mapv #(create-table model dialect (get-in model [:resources %])) (creation-order model))
-      (into (join-tables model dialect))
-      (into (indexes model dialect))))
+  (into (tables model dialect) (indexes model dialect)))
 
 (defn projection [resource]
   (str "SELECT " (str/join ", " (map quoted (conj (columns-of resource) version-column)))
@@ -293,7 +296,7 @@
               :delete       (first (delete-by-identity resource nil))
               :count        (first (count-of resource {}))}])))
 
-(defn join-tables [model dialect]
+(defn join-table-statements [model dialect]
   (->> (for [k (:order model)
              :let [owner (get-in model [:resources k])]
              [_ relation] (:relations owner)
@@ -313,9 +316,10 @@
                "FOREIGN KEY (" (quoted (:target-via-column join)) ") REFERENCES " (quoted (:table target))
                " (" (quoted (get-in target [:fields (:identity target) :column])) "))")])
        (reduce (fn [m [table statement]] (if (contains? m table) m (assoc m table statement)))
-               {})
-       vals
-       vec))
+               {})))
+
+(defn join-tables [model dialect]
+  (vec (vals (join-table-statements model dialect))))
 
 (defn- linked-source [target relation]
   (let [join (:join relation)]
@@ -431,3 +435,26 @@
          (str "CREATE INDEX " (when-not (creates-only-once? dialect) "IF NOT EXISTS ")
               (quoted (str "ix_" (name table) "_" (name column)))
               " ON " (quoted table) " (" (quoted column) ")"))))
+
+(defn add-column [dialect resource field]
+  (str "ALTER TABLE " (quoted (:table resource))
+       " ADD COLUMN " (column-clause dialect resource field)))
+
+(defn add-version-column [dialect table]
+  (str "ALTER TABLE " (quoted table)
+       " ADD COLUMN " (quoted version-column) " " (column-type dialect :long) " DEFAULT 0 NOT NULL"))
+
+(def ^:private adds-required-columns #{:h2 :hsqldb :derby :postgres :mysql :ansi})
+
+(defn adds-required-column? [dialect]
+  (contains? adds-required-columns dialect))
+
+(defn table-of [model table]
+  (some (fn [k] (let [resource (get-in model [:resources k])]
+                  (when (= table (:table resource)) resource)))
+        (:order model)))
+
+(defn creation-of [model dialect table]
+  (if-let [resource (table-of model table)]
+    (create-table model dialect resource)
+    (get (join-table-statements model dialect) table)))
