@@ -54,7 +54,7 @@
    "suite"   ["with-profile" "+harness" "run" "-m" "kaocha.runner"]
    "cover"   ["with-profile" "+coverage" "run" "-m" "cloverage.coverage"
               "-p" "src" "-s" "test"
-              "-t" "hypermedia\\.(?!.*(e2e|concurrency|package)).*-test"
+              "-t" "hypermedia\\.(?!.*(e2e|concurrency|package|evolve)).*-test"
               "--fail-threshold" "85" "--codecov"]
    "serve"   ["with-profile" "+drivers" "run" "-m" "hypermedia.main"]
    "bench"   ["with-profile" "+harness" "run" "-m" "hypermedia.bench"]})

@@ -1,0 +1,10 @@
+{:resources
+ {:note {:table       :evo_notes
+         :fields      {:id    {:type :uuid :identity true :generated true}
+                       :body  {:type :string :required true}
+                       :tag   {:type :string}
+                       :count {:type :long}}
+         :searches    {:by-tag {:predicates [:tag]}}}
+  :label {:table  :evo_labels
+          :fields {:id   {:type :uuid :identity true :generated true}
+                   :name {:type :string :required true}}}}}

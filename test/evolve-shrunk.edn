@@ -1,0 +1,3 @@
+{:resources
+ {:note {:table  :evo_notes
+         :fields {:id {:type :uuid :identity true :generated true}}}}}

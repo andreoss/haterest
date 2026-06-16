@@ -2,9 +2,9 @@
 {:tests [{:id          :unit
           :test-paths  ["test"]
           :ns-patterns [".*-test$"]
-          :skip        [hypermedia.e2e-test hypermedia.concurrency-test hypermedia.package-test]}
+          :skip        [hypermedia.e2e-test hypermedia.concurrency-test hypermedia.package-test hypermedia.evolve-test]}
          {:id          :e2e
           :test-paths  ["test"]
-          :ns-patterns ["e2e-test$" "concurrency-test$" "package-test$"]}]
+          :ns-patterns ["e2e-test$" "concurrency-test$" "package-test$" "evolve-test$"]}]
  :reporter kaocha.report/dots
  :color? false}
