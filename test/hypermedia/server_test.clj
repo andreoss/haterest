@@ -1,5 +1,5 @@
 (ns hypermedia.server-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [clojure.test :refer [deftest is testing]]
             [hypermedia.api :as api]
             [hypermedia.api-test :as fixture]
             [hypermedia.client :as client]
@@ -23,3 +23,30 @@
       (is (not= 0 (:port running)))
       (is (= "127.0.0.1" (:host running)))
       (finally ((:stop running))))))
+
+(deftest a-request-in-flight-finishes-before-the-server-stops
+  (let [entered  (java.util.concurrent.CountDownLatch. 1)
+        answered (atom nil)
+        slow     (fn [_]
+                   (.countDown entered)
+                   (Thread/sleep 700)
+                   {:status 200 :headers {"Content-Type" "text/plain"} :body "finished"})
+        running  (server/start slow {:port 0 :drain 5000})
+        caller   (future (client/request (:port running) :get "/slow"))]
+    (.await entered)
+    (let [began   (System/currentTimeMillis)
+          _       ((:stop running))
+          stopped (- (System/currentTimeMillis) began)]
+      (reset! answered @caller)
+      (testing "the caller is answered rather than cut off"
+        (is (= 200 (:status @answered)))
+        (is (= "finished" (:raw @answered))))
+      (testing "and stopping waited for it"
+        (is (<= 300 stopped) (str "stop returned after " stopped "ms"))))))
+
+(deftest the-server-refuses-work-once-it-has-stopped
+  (let [running (server/start (fn [_] {:status 200 :headers {} :body "ok"}) {:port 0})
+        port    (:port running)]
+    (is (= 200 (:status (client/request port :get "/"))))
+    ((:stop running))
+    (is (thrown? Exception (client/request port :get "/")))))
