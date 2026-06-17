@@ -22,7 +22,8 @@ export BASE=http://127.0.0.1:8181
 | `-h --host`        | 127.0.0.1
 | `-c --connections` | most connections to hold open
 | `--connection-timeout` | how long to wait for one
-| `--migrate`        | derive and apply the schema before serving
+| `--migrate`        | bring the store to the schema before serving
+| `--plan`           | print what a migration would do, and do nothing
 |===
 
 `lein serve -- --help` lists them.
@@ -211,6 +212,32 @@ constants, and turns an invalid schema into a build failure:
 ----
 (hypermedia.api/defapi shop {:resources {...}})
 ----
+
+== Changing the schema
+
+Add a field, redeploy with `--migrate`, and the store is brought to the
+schema: tables and columns it lacks are added, indexes are ensured, and rows
+already written are left alone.
+
+What it will not do is guess at something destructive. A column the schema no
+longer declares is reported, never dropped; a column whose type no longer
+matches is reported; a required column cannot be added to a table that already
+holds rows. On any of those the platform refuses to start rather than serve a
+schema the store cannot meet.
+
+`--plan` prints what a migration would do and does nothing:
+
+[source,shell]
+----
+lein serve -s example.edn -d 'jdbc:h2:./store' --plan
+----
+
+----
+ALTER TABLE "books" ADD COLUMN "tag" VARCHAR(255)
+refused: books.year type-differs (schema says string, store holds bigint)
+----
+
+It exits non-zero when anything is refused, so a deployment can ask first.
 
 == Package it
 
