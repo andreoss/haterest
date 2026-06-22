@@ -13,6 +13,7 @@
             [hypermedia.schema :as schema]
             [hypermedia.sql :as sql]
             [hypermedia.store :as store]
+            [hypermedia.trace :as trace]
             [hypermedia.uri :as uri]
             [hypermedia.urilist :as urilist]
             [jsonista.core :as json]
@@ -642,7 +643,8 @@
 
 (defn- report [request exception]
   (binding [*out* *err*]
-    (println (str "unserved " (str/upper-case (name (:request-method request))) " " (:uri request)
+    (println (str "unserved " (or (trace/of request) "-") " "
+                  (str/upper-case (name (:request-method request))) " " (:uri request)
                   ": " (.getName (class exception)) " " (.getMessage ^Exception exception)))
     (doseq [frame (take 6 (.getStackTrace ^Exception exception))]
       (println "   " (str frame)))))
@@ -662,7 +664,7 @@
                    (conj ["/health" {:name :hypermedia.route/health :get (health-endpoint store)}]))]
     (ring/ring-handler (ring/router routes {:conflicts nil})
                        (default-handler)
-                       {:middleware [guarded params/wrap-params keywordise-params]})))
+                       {:middleware [trace/identified guarded params/wrap-params keywordise-params]})))
 
 (defmacro defapi [sym config]
   (let [model (schema/parse (eval config))]
