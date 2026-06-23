@@ -68,3 +68,34 @@
     (is (= 24 (:connections options)))
     (is (= 2000 (:connection-timeout options))))
   (is (nil? (:connections (main/options ["-s" "a" "-d" "b"])))))
+
+(deftest a-store-it-cannot-reach-is-said-plainly
+  (let [failed (main/refusal (java.net.ConnectException. "Connection refused")
+                             {:database "jdbc:postgresql://127.0.0.1:1/nope"})]
+    (is (= 4 (:code failed)))
+    (is (= "cannot reach the store at jdbc:postgresql://127.0.0.1:1/nope" (first (:lines failed))))
+    (is (clojure.string/includes? (second (:lines failed)) "Connection refused"))))
+
+(deftest a-schema-that-is-not-there-is-said-plainly
+  (let [failed (main/refusal (ex-info "schema not found" {:type :hypermedia.config/not-found})
+                             {:schema "nowhere.edn"})]
+    (is (= 2 (:code failed)))
+    (is (= ["no schema at nowhere.edn"] (:lines failed)))))
+
+(deftest a-store-that-cannot-be-evolved-is-said-plainly
+  (let [failed (main/refusal (ex-info "refused" {:type :hypermedia.store.jdbc/refused
+                                                 :refusals [{:table :t :column :c :reason :type-differs}]})
+                             {})]
+    (is (= 3 (:code failed)))
+    (is (= 1 (count (:refusals failed)))))
+  (let [failed (main/refusal (ex-info "unfinished" {:type :hypermedia.store.jdbc/unfinished
+                                                    :failures [{:message "lock timed out"}]})
+                             {})]
+    (is (= 3 (:code failed)))
+    (is (some #(= "lock timed out" %) (:lines failed)))))
+
+(deftest the-drain-and-the-log-are-operator-decisions
+  (let [options (main/options ["-s" "a" "-d" "b" "--quiet" "--drain" "2500"])]
+    (is (true? (:quiet options)))
+    (is (= 2500 (:drain options))))
+  (is (false? (:quiet (main/options ["-s" "a" "-d" "b"])))))
