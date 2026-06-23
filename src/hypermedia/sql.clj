@@ -429,12 +429,15 @@
    {}
    (:order model)))
 
+(defn index-of [dialect table column]
+  (str "CREATE INDEX " (when-not (creates-only-once? dialect) "IF NOT EXISTS ")
+       (quoted (str "ix_" (name table) "_" (name column)))
+       " ON " (quoted table) " (" (quoted column) ")"))
+
 (defn indexes [model dialect]
   (vec (for [[table columns] (sort-by key (indexed-columns model dialect))
              column columns]
-         (str "CREATE INDEX " (when-not (creates-only-once? dialect) "IF NOT EXISTS ")
-              (quoted (str "ix_" (name table) "_" (name column)))
-              " ON " (quoted table) " (" (quoted column) ")"))))
+         (index-of dialect table column))))
 
 (defn add-column [dialect resource field]
   (str "ALTER TABLE " (quoted (:table resource))

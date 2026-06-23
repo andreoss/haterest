@@ -166,29 +166,42 @@
            (first (jdbc/execute! datasource (sql/delete-join relation key ids))))
           0))))
 
-(defn- already-there? [exception]
-  (let [text (str (.getMessage ^Exception exception))]
-    (or (str/includes? text "already exists")
-        (str/includes? text "X0Y32"))))
+(def ^:private attempts 6)
 
-(defn- apply-statements [datasource statements]
-  (doseq [statement statements]
-    (try (jdbc/execute! datasource [statement])
-         (catch Exception e
-           (when-not (already-there? e) (throw e))))))
+(defn- attempted [datasource statements]
+  (reduce (fn [failed statement]
+            (try (jdbc/execute! datasource [statement]) failed
+                 (catch Exception e
+                   (conj failed {:statement statement
+                                 :message (first (str/split-lines (str (.getMessage e))))}))))
+          []
+          statements))
+
+(defn- pause [attempt]
+  (Thread/sleep (long (+ 40 (* attempt 120) (rand-int 160)))))
 
 (defn evolution [datasource model dialect]
   (evolve/evolution datasource model dialect))
 
 (defn migrate! [datasource model dialect]
-  (let [{:keys [statements refusals notes]} (evolve/evolution datasource model dialect)]
-    (when (seq refusals)
-      (throw (ex-info "the store cannot be evolved to this schema"
-                      {:type ::refused :refusals refusals})))
-    (apply-statements datasource (sql/tables model dialect))
-    (apply-statements datasource statements)
-    (apply-statements datasource (sql/indexes model dialect))
-    notes))
+  (loop [attempt 0 failures []]
+    (let [{:keys [statements refusals notes]} (evolve/evolution datasource model dialect)]
+      (cond
+        (seq refusals)
+        (throw (ex-info "the store cannot be evolved to this schema"
+                        {:type ::refused :refusals refusals}))
+
+        (empty? statements)
+        notes
+
+        (>= attempt attempts)
+        (throw (ex-info "the store could not be evolved to this schema"
+                        {:type ::unfinished :failures failures :remaining statements}))
+
+        :else
+        (let [failed (attempted datasource statements)]
+          (when (seq failed) (pause attempt))
+          (recur (inc attempt) failed))))))
 
 (defn open [{:keys [url model migrate? statements pool]}]
   (let [dialect    (sql/dialect url)

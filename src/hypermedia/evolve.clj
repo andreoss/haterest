@@ -14,20 +14,31 @@
    :instant #{12 93 2014}
    :date    #{12 91}})
 
-(defn- reported [^java.sql.DatabaseMetaData metadata pattern]
+(defn- patterns [table]
+  [(name table) (str/upper-case (name table))])
+
+(defn- reported-columns [^java.sql.DatabaseMetaData metadata pattern]
   (with-open [rows (.getColumns metadata nil nil pattern nil)]
     (loop [found {}]
       (if (.next rows)
-        (recur (assoc found
-                      (keyword (str/lower-case (.getString rows "COLUMN_NAME")))
-                      {:code      (.getInt rows "DATA_TYPE")
-                       :nullable? (not= "NO" (.getString rows "IS_NULLABLE"))}))
+        (recur (if-let [column (.getString rows "COLUMN_NAME")]
+                 (assoc found (keyword (str/lower-case column))
+                        {:code      (.getInt rows "DATA_TYPE")
+                         :nullable? (not= "NO" (.getString rows "IS_NULLABLE"))})
+                 found))
         found))))
 
-(defn- columns-of [metadata table]
-  (reduce (fn [found pattern] (merge found (reported metadata pattern)))
-          {}
-          [(name table) (str/upper-case (name table))]))
+(defn- reported-indexes [^java.sql.DatabaseMetaData metadata pattern]
+  (try
+    (with-open [rows (.getIndexInfo metadata nil nil pattern false true)]
+      (loop [found #{}]
+        (if (.next rows)
+          (recur (let [column (.getString rows "COLUMN_NAME")]
+                   (if (and column (= 1 (.getShort rows "ORDINAL_POSITION")))
+                     (conj found (keyword (str/lower-case column)))
+                     found)))
+          found)))
+    (catch Exception _ #{})))
 
 (defn tables-of [model]
   (into (mapv #(:table (get-in model [:resources %])) (:order model))
@@ -39,10 +50,18 @@
 (defn live [datasource model]
   (with-open [connection (jdbc/get-connection datasource)]
     (let [metadata (.getMetaData connection)]
-      (into {} (for [table (tables-of model)
-                     :let [columns (columns-of metadata table)]
-                     :when (seq columns)]
-                 [table columns])))))
+      (reduce (fn [acc table]
+                (let [columns (reduce (fn [m p] (merge m (reported-columns metadata p)))
+                                      {} (patterns table))]
+                  (if (seq columns)
+                    (-> acc
+                        (assoc-in [:columns table] columns)
+                        (assoc-in [:indexes table]
+                                  (reduce (fn [s p] (into s (reported-indexes metadata p)))
+                                          #{} (patterns table))))
+                    acc)))
+              {:columns {} :indexes {}}
+              (tables-of model)))))
 
 (defn- declared [model]
   (into {}
@@ -56,70 +75,89 @@
                                     :required? (:required? spec)
                                     :field field}]))])))
 
-(defn- holds-rows? [datasource table]
-  (boolean (some-> (jdbc/execute-one! datasource [(str "SELECT COUNT(*) AS n FROM " (sql/quoted table))])
-                   vals first pos?)))
+(defn- joins-declared [model]
+  (into {}
+        (for [k (:order model)
+              [_ relation] (:relations (get-in model [:resources k]))
+              :when (= :many-to-many (:kind relation))
+              :let [owner  (get-in model [:resources k])
+                    target (get-in model [:resources (:target relation)])
+                    join   (:join relation)]]
+          [(:table join)
+           {(:via-column join)
+            {:type (get-in owner [:fields (:identity owner) :type]) :required? true :join? true}
+            (:target-via-column join)
+            {:type (get-in target [:fields (:identity target) :type]) :required? true :join? true}}])))
 
-(defn- joins-wanted [model]
-  (into {} (for [k (:order model)
-                 [_ relation] (:relations (get-in model [:resources k]))
-                 :when (= :many-to-many (:kind relation))]
-             [(get-in relation [:join :table]) {}])))
+(defn- column-difference [acc model dialect present occupied? table columns]
+  (let [resource (sql/table-of model table)]
+    (reduce
+     (fn [acc [column {:keys [type required? field version? join?]}]]
+       (let [actual (get present column)]
+         (cond
+           (and (nil? actual) join?)
+           (update acc :refusals conj {:table table :column column :reason :join-column-missing})
+
+           (and (nil? actual) version?)
+           (update acc :alters conj (sql/add-version-column dialect table))
+
+           (and (nil? actual) (not required?))
+           (update acc :alters conj (sql/add-column dialect resource field))
+
+           (nil? actual)
+           (cond
+             (not (sql/adds-required-column? dialect))
+             (update acc :refusals conj {:table table :column column :reason :cannot-add-required})
+
+             (occupied? table)
+             (update acc :refusals conj {:table table :column column :reason :required-column-on-rows})
+
+             :else
+             (update acc :alters conj (sql/add-column dialect resource field)))
+
+           (not (contains? (get accepted type #{}) (:code actual)))
+           (update acc :refusals conj {:table table :column column :reason :type-differs
+                                       :declared type :found (:code actual)})
+
+           :else acc)))
+     acc columns)))
+
+(defn- surplus [acc table columns present]
+  (reduce (fn [acc [column {:keys [nullable?]}]]
+            (cond
+              (contains? columns column) acc
+              nullable? (update acc :notes conj {:table table :column column :reason :not-declared})
+              :else     (update acc :refusals conj
+                                {:table table :column column :reason :required-and-not-declared})))
+          acc present))
 
 (defn plan [model dialect live occupied?]
-  (let [wanted (merge (joins-wanted model) (declared model))]
-    (reduce
-     (fn [acc [table columns]]
-       (let [resource (sql/table-of model table)
-             present  (get live table)]
-         (if (nil? present)
-           (update acc :statements conj (sql/creation-of model dialect table))
-           (reduce
-            (fn [acc [column {:keys [type required? field version?]}]]
-              (let [actual (get present column)]
-                (cond
-                  (and (nil? actual) version?)
-                  (update acc :statements conj (sql/add-version-column dialect table))
-
-                  (and (nil? actual) (not required?))
-                  (update acc :statements conj (sql/add-column dialect resource field))
-
-                  (nil? actual)
-                  (cond
-                    (not (sql/adds-required-column? dialect))
-                    (update acc :refusals conj
-                            {:table table :column column :reason :cannot-add-required})
-
-                    (occupied? table)
-                    (update acc :refusals conj
-                            {:table table :column column :reason :required-column-on-rows})
-
-                    :else
-                    (update acc :statements conj (sql/add-column dialect resource field)))
-
-                  (not (contains? (get accepted type #{}) (:code actual)))
-                  (update acc :refusals conj
-                          {:table table :column column :reason :type-differs
-                           :declared type :found (:code actual)})
-
-                  :else acc)))
-            acc
-            columns)))) 
-     (reduce
-      (fn [acc [table columns]]
-        (if-let [present (get live table)]
-          (reduce (fn [acc [column {:keys [nullable?]}]]
-                    (cond
-                      (contains? columns column) acc
-                      nullable? (update acc :notes conj {:table table :column column :reason :not-declared})
-                      :else     (update acc :refusals conj
-                                        {:table table :column column :reason :required-and-not-declared})))
-                  acc present)
-          acc))
-      {:statements [] :refusals [] :notes []}
-      wanted)
-     wanted)))
+  (let [wanted (merge (joins-declared model) (declared model))
+        shape  (:columns live)
+        held   (:indexes live)
+        base   (reduce
+                (fn [acc [table columns]]
+                  (if-let [present (get shape table)]
+                    (-> acc
+                        (column-difference model dialect present occupied? table columns)
+                        (surplus table columns present))
+                    (update acc :creates conj (sql/creation-of model dialect table))))
+                {:creates [] :alters [] :indexes [] :refusals [] :notes []}
+                wanted)
+        full   (reduce
+                (fn [acc [table columns]]
+                  (reduce (fn [acc column]
+                            (if (contains? (get held table #{}) column)
+                              acc
+                              (update acc :indexes conj (sql/index-of dialect table column))))
+                          acc columns))
+                base
+                (sort-by key (sql/indexed-columns model dialect)))]
+    (assoc full :statements (vec (concat (:creates full) (:alters full) (:indexes full))))))
 
 (defn evolution [datasource model dialect]
   (let [present (live datasource model)]
-    (plan model dialect present #(holds-rows? datasource %))))
+    (plan model dialect present
+          #(boolean (some-> (jdbc/execute-one! datasource
+                                               [(str "SELECT COUNT(*) AS n FROM " (sql/quoted %))])
+                            vals first pos?)))))
