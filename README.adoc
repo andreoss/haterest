@@ -22,6 +22,8 @@ export BASE=http://127.0.0.1:8181
 | `-h --host`        | 127.0.0.1
 | `-c --connections` | most connections to hold open
 | `--connection-timeout` | how long to wait for one
+| `--drain`          | how long to let requests finish when stopping; 10s
+| `--quiet`          | do not log requests
 | `--migrate`        | bring the store to the schema before serving
 | `--plan`           | print what a migration would do, and do nothing
 |===
@@ -161,6 +163,22 @@ Also served: `/health` reports the store rather than its own handle;
 adds `_templates` stating what may be written; `OPTIONS` answers `Allow`;
 `?projection=summary` narrows a document to what the schema declared.
 
+== Watching it
+
+Every answer carries `X-Request-Id`. One the caller brought is kept, so a
+gateway's identifier follows the request through; otherwise one is minted.
+The same identifier names the request in the log and in anything the server
+could not serve, so a report of a failure leads to the request that caused it.
+
+----
+from-the-gateway GET /books 200 1ms
+3c247fa9-f72 POST /books 422 22ms
+3ffc0632-773 GET /books/nope 404 1ms
+----
+
+Stopping lets requests in flight finish first, for as long as `--drain`
+allows.
+
 == The schema language
 
 [cols="1,3"]
@@ -238,6 +256,10 @@ refused: books.year type-differs (schema says string, store holds bigint)
 ----
 
 It exits non-zero when anything is refused, so a deployment can ask first.
+
+Instances starting together are safe: a migration applies its plan, reads the
+store back, and is finished only when nothing is left to do, so a failure that
+only means another instance got there first is retried rather than fatal.
 
 == Package it
 
