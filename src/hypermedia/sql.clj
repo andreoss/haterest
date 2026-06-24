@@ -139,15 +139,22 @@
                                      :resource (:name resource)
                                      :fields (vec unknown)}))))
 
+(declare keyset-predicate)
+
+(defn total-order [resource order]
+  (let [id (:identity resource)]
+    (if (some #(= id (first %)) order)
+      (vec order)
+      (conj (vec order) [id :asc]))))
+
 (defn- order-clause
   ([resource order] (order-clause resource order ""))
   ([resource order prefix]
-   (when (seq order)
-     (check-fields resource (map first order))
-     (str " ORDER BY "
-          (str/join ", " (for [[field direction] order]
-                           (str prefix (quoted (get-in resource [:fields field :column]))
-                                (if (= :desc direction) " DESC" " ASC"))))))))
+   (check-fields resource (map first order))
+   (str " ORDER BY "
+        (str/join ", " (for [[field direction] (total-order resource order)]
+                         (str prefix (quoted (get-in resource [:fields field :column]))
+                              (if (= :desc direction) " DESC" " ASC")))))))
 
 (defn- values-of [value]
   (if (coll? value) (vec (sort-by str value)) [value]))
@@ -168,15 +175,19 @@
 
 (defn select
   ([resource criteria] (select :ansi resource criteria))
-  ([dialect resource {:keys [where order limit offset]}]
+  ([dialect resource {:keys [where order limit offset after]}]
    (check-fields resource (keys where))
    (let [clause (where-clause resource where)
-         fetch  (fetch-clause dialect limit offset)]
+         keyset (when after (keyset-predicate dialect resource order after))
+         fetch  (fetch-clause dialect limit (when-not keyset offset))
+         joined (str (:sql clause)
+                     (when keyset
+                       (str (if (:sql clause) " AND " " WHERE ") (:sql keyset))))]
      (into [(str (projection resource)
-                 (:sql clause)
+                 joined
                  (order-clause resource order)
                  (:sql fetch))]
-           (concat (:params clause) (:params fetch))))))
+           (concat (:params clause) (:params keyset) (:params fetch))))))
 
 (defn count-of [resource {:keys [where]}]
   (check-fields resource (keys where))
@@ -386,7 +397,7 @@
                 (:sql clause))]
           (concat (map #(get row %) fields) (:params clause)))))
 
-(defn- column-of [resource field]
+(defn column-of [resource field]
   (get-in resource [:fields field :column]))
 
 (def ^:private indexes-its-foreign-keys #{:h2 :mysql :derby :hsqldb})
@@ -461,3 +472,43 @@
   (if-let [resource (table-of model table)]
     (create-table model dialect resource)
     (get (join-table-statements model dialect) table)))
+
+(def ^:private compares-rows #{:h2 :postgres :mysql :sqlite})
+
+(defn compares-rows? [dialect] (contains? compares-rows dialect))
+
+(defn- comparison [direction] (if (= :desc direction) "<" ">"))
+
+(defn- expanded [resource total values]
+  (let [steps (for [n (range (count total))
+                    :let [[field direction] (nth total n)
+                          earlier (take n total)]]
+                {:sql (str "("
+                           (str/join " AND "
+                                     (concat
+                                      (for [[before _] earlier]
+                                        (str (quoted (column-of resource before)) " = ?"))
+                                      [(str (quoted (column-of resource field))
+                                            " " (comparison direction) " ?")]))
+                           ")")
+                 :params (conj (mapv #(nth values %) (range n)) (nth values n))})]
+    {:sql    (str "(" (str/join " OR " (map :sql steps)) ")")
+     :params (vec (mapcat :params steps))}))
+
+(defn- as-row [resource total values]
+  {:sql    (str "(" (str/join ", " (map #(quoted (column-of resource (first %))) total)) ") "
+                (comparison (second (first total)))
+                " (" (str/join ", " (repeat (count total) "?")) ")")
+   :params (vec values)})
+
+(defn keyset-predicate
+  ([resource order values] (keyset-predicate :ansi resource order values))
+  ([dialect resource order values]
+   (let [total (total-order resource order)]
+     (when (and (seq total) (= (count total) (count values)))
+       (let [uniform (apply = (map second total))]
+         (assoc (if (and uniform (compares-rows? dialect))
+                  (as-row resource total values)
+                  (expanded resource total values))
+                :fields (mapv first total)))))))
+
