@@ -7,7 +7,8 @@
             [hypermedia.evolve :as evolve]
             [hypermedia.main :as main]
             [hypermedia.sql :as sql]
-            [hypermedia.store.jdbc :as jdbc-store]))
+            [hypermedia.store.jdbc :as jdbc-store]
+            [next.jdbc :as jdbc]))
 
 (defn- opened [engine schema migrate?]
   (jdbc-store/open {:url (:url engine) :model (:model (config/api schema)) :migrate? migrate?}))
@@ -102,3 +103,67 @@
           (testing "the store refuses to open rather than serve a schema it cannot meet"
             (is (thrown? clojure.lang.ExceptionInfo (opened engine "evolve-retyped.edn" true)))))
         (finally ((:stop engine)))))))
+
+(def replicas 4)
+
+(defn- starting-together [engine schema]
+  (let [model   (:model (config/api schema))
+        gate    (java.util.concurrent.CountDownLatch. 1)
+        results (java.util.concurrent.ConcurrentLinkedQueue.)
+        threads (mapv (fn [n]
+                        (Thread.
+                         ^Runnable
+                         (fn []
+                           (.await gate)
+                           (.add results
+                                 (try (let [store (jdbc-store/open {:url (:url engine)
+                                                                    :model model
+                                                                    :migrate? true})]
+                                        (jdbc-store/close store)
+                                        {:replica n :started true})
+                                      (catch Exception e
+                                        {:replica n :started false
+                                         :because (first (str/split-lines (str (.getMessage e))))}))))))
+                      (range replicas))]
+    (run! #(.start ^Thread %) threads)
+    (.countDown gate)
+    (run! #(.join ^Thread %) threads)
+    (vec results)))
+
+(deftest replicas-starting-together-all-come-up
+  (let [{:keys [ready]} (database/engines)]
+    (is (seq ready))
+    (doseq [engine ready]
+      (try
+        (testing (str (name (:name engine)) " brings up " replicas " replicas at once")
+          (let [seed (opened engine "evolve-before.edn" true)]
+            (jdbc-store/close seed))
+          (let [outcomes (starting-together engine "evolve-after.edn")
+                refused  (remove :started outcomes)]
+            (is (empty? refused) (str "these did not start: " (vec refused)))
+            (testing "and the store ends up matching the schema"
+              (let [{:keys [statements refusals]} (plan-for engine "evolve-after.edn")]
+                (is (empty? statements) (str "left to do: " statements))
+                (is (empty? refusals) (str "refused: " refusals))))))
+        (finally ((:stop engine)))))))
+
+(deftest an-index-the-schema-wants-is-noticed-when-it-is-missing
+  (let [engine (database/h2)]
+    (try
+      (let [store (opened engine "evolve-after.edn" true)]
+        (try
+          (jdbc/execute! (:datasource store) ["DROP INDEX \"ix_evo_notes_tag\""])
+          (let [{:keys [statements]} (jdbc-store/evolution (:datasource store)
+                                                           (:model (config/api "evolve-after.edn"))
+                                                           :h2)]
+            (is (= 1 (count statements)) (str "planned " statements))
+            (is (str/includes? (first statements) "ix_evo_notes_tag")))
+          (finally (jdbc-store/close store))))
+      (let [again (opened engine "evolve-after.edn" true)]
+        (try
+          (let [{:keys [statements]} (jdbc-store/evolution (:datasource again)
+                                                           (:model (config/api "evolve-after.edn"))
+                                                           :h2)]
+            (is (empty? statements) "the index was not put back"))
+          (finally (jdbc-store/close again))))
+      (finally ((:stop engine))))))
