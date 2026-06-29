@@ -58,7 +58,13 @@
 
 (defn- encode-criteria [dialect resource criteria]
   (cond-> criteria
-    (:where criteria) (update :where #(encode-row dialect resource %))))
+    (:where criteria) (update :where #(encode-row dialect resource %))
+    (:after criteria)
+    (update :after
+            (fn [values]
+              (mapv (fn [field value] (sql/encode dialect (type-of resource field) value))
+                    (mapv first (sql/total-order resource (:order criteria)))
+                    values)))))
 
 (defrecord Jdbc [datasource model dialect statements]
   store/Store

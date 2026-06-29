@@ -43,6 +43,7 @@
 (defn criteria [pageable where]
   (cond-> {:where where}
     (seq (:sort pageable)) (assoc :order (:sort pageable))
+    (:after pageable)      (assoc :after (:after pageable))
     true (assoc :limit (:size pageable)
                 :offset (* (:number pageable) (:size pageable)))))
 
@@ -62,11 +63,18 @@
    :totalPages    (pages pageable total)
    :number        (:number pageable)})
 
-(defn links [base pageable total]
-  (let [last-page (dec (pages pageable total))
-        number    (:number pageable)]
-    (cond-> {:self  (hal/href (href base pageable number))
-             :first (hal/href (href base pageable 0))
-             :last  (hal/href (href base pageable last-page))}
-      (pos? number)        (assoc :prev (hal/href (href base pageable (dec number))))
-      (< number last-page) (assoc :next (hal/href (href base pageable (inc number)))))))
+(defn continued [base pageable cursor]
+  (str (href base pageable (inc (:number pageable))) "&after=" (uri/encode cursor)))
+
+(defn links
+  ([base pageable total] (links base pageable total nil))
+  ([base pageable total cursor]
+   (let [last-page (dec (pages pageable total))
+         number    (:number pageable)]
+     (cond-> {:self  (hal/href (href base pageable number))
+              :first (hal/href (href base pageable 0))
+              :last  (hal/href (href base pageable last-page))}
+       (pos? number)        (assoc :prev (hal/href (href base pageable (dec number))))
+       (< number last-page) (assoc :next (hal/href (if cursor
+                                                     (continued base pageable cursor)
+                                                     (href base pageable (inc number)))))))))

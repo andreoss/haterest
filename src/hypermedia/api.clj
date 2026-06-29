@@ -1,6 +1,7 @@
 (ns hypermedia.api
   (:require [clojure.string :as str]
             [hypermedia.alps :as alps]
+            [hypermedia.cursor :as cursor]
             [hypermedia.etag :as etag]
             [hypermedia.forms :as forms]
             [hypermedia.hal :as hal]
@@ -160,10 +161,12 @@
     {(rel/curied (:curie model) :search) (hal/link (:search-path resource))}))
 
 (defn- collection-doc [model store resource rows base pageable total projection]
-  (let [embeds (embeds-for model store resource rows projection)]
+  (let [embeds (embeds-for model store resource rows projection)
+        cursor (when (seq rows)
+                 (cursor/of resource (:sort pageable) (last rows) (:number pageable)))]
     (hal/document {:page (page/descriptor pageable total)}
-                  (merge (page/links base pageable total)
-                         {:profile (hal/link (:profile-path resource))}
+                  (merge (page/links base pageable total cursor)
+                         {:profile (hal/href (:profile-path resource))}
                          (searches-link model resource))
                   {(:collection resource) (mapv #(item-doc model resource % embeds projection) rows)})))
 
@@ -273,7 +276,7 @@
                 {:instance (:uri request)})
     (precondition-failed request)))
 
-(def ^:private slice-params #{"page" "size" "sort"})
+(def ^:private slice-params #{"page" "size" "sort" "after"})
 
 (defn- query-suffix [request]
   (let [kept (sort-by key (remove (fn [[k _]] (contains? slice-params k)) (:query-params request)))]
@@ -291,8 +294,17 @@
       (seq (:errors pageable))
       (problem/of 400 "the slice cannot be read"
                   {:instance (:uri request) :errors (:errors pageable)})
+
+      (:mismatched (some->> (get-in request [:query-params "after"])
+                            (cursor/read-from resource (:sort pageable))))
+      (problem/of 400 "the cursor does not belong to this ordering"
+                  {:instance (:uri request)})
+
       :else
-      (let [rows  (rows-of pageable)
+      (let [carried (when-let [text (get-in request [:query-params "after"])]
+                      (cursor/read-from resource (:sort pageable) text))
+            pageable (if (:after carried) (assoc pageable :after (:after carried)) pageable)
+            rows  (rows-of pageable)
             known (count rows)
             total (if (and (< known (:size pageable))
                            (or (pos? known) (zero? (:number pageable))))
