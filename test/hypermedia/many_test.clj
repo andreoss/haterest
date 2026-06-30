@@ -72,7 +72,8 @@
   (let [{:keys [call]} (subject)
         body (:body (call :get "/authors/1/books?size=1&sort=title,asc"))]
     (is (= ["Dune"] (map :title (get-in body [:_embedded :books]))))
-    (is (= "/authors/1/books?page=1&size=1&sort=title%2Casc" (get-in body [:_links :next :href])))
+    (is (string/starts-with? (get-in body [:_links :next :href])
+                             "/authors/1/books?page=1&size=1&sort=title%2Casc"))
     (is (= ["Sandworms"]
            (map :title (get-in (call :get "/authors/1/books?page=1&size=1&sort=title,asc")
                                [:body :_embedded :books]))))))

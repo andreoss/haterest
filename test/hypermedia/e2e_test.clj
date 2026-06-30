@@ -182,10 +182,48 @@
            (is (= false (get-in amended [:body :done])))
            (is (= 43 (get-in amended [:body :tally])))))))))
 
+(defn- walked [port href limit]
+  (loop [href href seen [] guard 0]
+    (let [body (:body (client/request port :get href))
+          seen (into seen (titles body :works))]
+      (if (and (get-in body [:_links :next :href]) (< guard limit))
+        (recur (get-in body [:_links :next :href]) seen (inc guard))
+        seen))))
+
+(defn- walking-scenario [engine]
+  (serving
+   engine "e2e-simple.edn"
+   (fn [port]
+     (let [writer (create port "/writers" {:name "Many"})]
+       (doseq [t (mapv #(format "work %02d" %) (range 25))]
+         (create port "/works" {:title t :year 2000 :writer (:location writer)}))
+       (let [everything (titles (:body (client/request port :get "/works?size=200&sort=title,asc"))
+                                :works)]
+
+         (testing "following next reaches every row once, in order"
+           (let [seen (walked port "/works?size=7&sort=title,asc" 20)]
+             (is (= everything seen))
+             (is (= (count seen) (count (distinct seen))))))
+
+         (testing "the same walk downwards"
+           (is (= (reverse everything) (walked port "/works?size=7&sort=title,desc" 20))))
+
+         (testing "and with no ordering asked for"
+           (let [seen (walked port "/works?size=7" 20)]
+             (is (= (count everything) (count seen)))
+             (is (= (count seen) (count (distinct seen))))))
+
+         (testing "a cursor from one ordering is refused by another"
+           (let [href  (get-in (client/request port :get "/works?size=7&sort=title,asc")
+                               [:body :_links :next :href])
+                 moved (str/replace href "sort=title%2Casc" "sort=year%2Casc")]
+             (is (= 400 (:status (client/request port :get moved)))))))))))
+
 (def scenarios
   [["navigation and writes" simple-scenario]
    ["many to many"          many-scenario]
-   ["declared value types"  shapes-scenario]])
+   ["declared value types"  shapes-scenario]
+   ["walking by cursor"     walking-scenario]])
 
 (deftest every-engine-serves-the-same-api
   (let [{:keys [ready declined]} (database/engines)]

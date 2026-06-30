@@ -120,5 +120,9 @@
           (is (= [1965 1969 1976] seen)))))))
 
 (deftest a-projection-survives-a-walk
-  (is (= "/books?page=1&size=1&sort=title%2Casc&projection=summary"
-         (get-in (GET "/books?size=1&sort=title,asc&projection=summary") [:body :_links :next :href]))))
+  (let [next-href (get-in (GET "/books?size=1&sort=title,asc&projection=summary")
+                          [:body :_links :next :href])]
+    (is (string/includes? next-href "projection=summary"))
+    (is (string/includes? next-href "after="))
+    (is (string/starts-with? next-href "/books?page=1&size=1&sort=title%2Casc"))
+    (is (= ["Emma"] (mapv :title (get-in (GET next-href) [:body :_embedded :books]))))))

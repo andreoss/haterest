@@ -1,5 +1,6 @@
 (ns hypermedia.slice-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [clojure.string :as string]
+            [clojure.test :refer [deftest is]]
             [hypermedia.api :as api]
             [hypermedia.store.memory :as memory]
             [jsonista.core :as json]))
@@ -45,7 +46,7 @@
   (let [links (get-in (GET "/books?page=1&size=2&sort=title,asc") [:body :_links])]
     (is (= "/books?page=1&size=2&sort=title%2Casc" (get-in links [:self :href])))
     (is (= "/books?page=0&size=2&sort=title%2Casc" (get-in links [:prev :href])))
-    (is (= "/books?page=2&size=2&sort=title%2Casc" (get-in links [:next :href])))
+    (is (string/starts-with? (get-in links [:next :href]) "/books?page=2&size=2&sort=title%2Casc&after="))
     (is (= "/books?page=2&size=2&sort=title%2Casc" (get-in links [:last :href])))))
 
 (deftest a-client-walks-the-collection-by-following-next
@@ -60,7 +61,8 @@
   (let [body (:body (GET "/authors/1/books?size=2&sort=title,desc"))]
     (is (= ["Hyperion" "Gormenghast"] (titles-of body)))
     (is (= 5 (get-in body [:page :totalElements])))
-    (is (= "/authors/1/books?page=1&size=2&sort=title%2Cdesc" (get-in body [:_links :next :href])))))
+    (is (string/starts-with? (get-in body [:_links :next :href])
+                              "/authors/1/books?page=1&size=2&sort=title%2Cdesc&after="))))
 
 (deftest refuses-a-slice-it-cannot-read
   (is (= 400 (:status (GET "/books?page=-1"))))

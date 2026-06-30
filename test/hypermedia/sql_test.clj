@@ -48,9 +48,9 @@
 
 (deftest builds-a-select-with-criteria
   (let [book (get-in model [:resources :book])]
-    (is (= ["SELECT \"id\", \"title\", \"author_id\", \"row_version\" FROM \"books\" WHERE \"author_id\" = ?" 1]
+    (is (= ["SELECT \"id\", \"title\", \"author_id\", \"row_version\" FROM \"books\" WHERE \"author_id\" = ? ORDER BY \"id\" ASC" 1]
            (sql/select book {:where {:author-id 1}})))
-    (is (= ["SELECT \"id\", \"title\", \"author_id\", \"row_version\" FROM \"books\""]
+    (is (= ["SELECT \"id\", \"title\", \"author_id\", \"row_version\" FROM \"books\" ORDER BY \"id\" ASC"]
            (sql/select book {})))))
 
 (deftest refuses-criteria-that-are-not-fields
@@ -103,9 +103,9 @@
 
 (deftest matches-a-set-with-one-predicate
   (let [book (get-in model [:resources :book])]
-    (is (= ["SELECT \"id\", \"title\", \"author_id\", \"row_version\" FROM \"books\" WHERE \"id\" IN (?, ?)" 1 2]
+    (is (= ["SELECT \"id\", \"title\", \"author_id\", \"row_version\" FROM \"books\" WHERE \"id\" IN (?, ?) ORDER BY \"id\" ASC" 1 2]
            (sql/select book {:where {:id #{1 2}}})))
-    (is (= ["SELECT \"id\", \"title\", \"author_id\", \"row_version\" FROM \"books\" WHERE 1 = 0"]
+    (is (= ["SELECT \"id\", \"title\", \"author_id\", \"row_version\" FROM \"books\" WHERE 1 = 0 ORDER BY \"id\" ASC"]
            (sql/select book {:where {:id #{}}})))
     (is (= ["SELECT COUNT(*) AS \"total\" FROM \"books\" WHERE \"id\" IN (?, ?)" 1 2]
            (sql/count-of book {:where {:id #{1 2}}})))))
@@ -189,3 +189,52 @@
                                       :via :a-id :target-via :b-id}}}
                  :b {:fields {:id {:type :long :identity true}}}}})]
     (is (= #{:b_id} (get (sql/indexed-columns model :h2) :ab)))))
+
+(deftest an-ordering-is-made-total
+  (let [book (get-in model [:resources :book])]
+    (is (= [[:title :asc] [:id :asc]] (sql/total-order book [[:title :asc]])))
+    (is (= [[:id :desc]] (sql/total-order book [[:id :desc]])))
+    (is (= [[:id :asc]] (sql/total-order book [])))))
+
+(deftest a-sort-on-a-column-that-repeats-still-orders-every-row
+  (let [book (get-in model [:resources :book])]
+    (is (str/includes? (first (sql/select book {:order [[:title :asc]]}))
+                       "ORDER BY \"title\" ASC, \"id\" ASC"))))
+
+(deftest continues-after-a-row-instead-of-counting-past-it
+  (let [book (get-in model [:resources :book])]
+    (is (= ["SELECT \"id\", \"title\", \"author_id\", \"row_version\" FROM \"books\" WHERE ((\"id\" > ?)) ORDER BY \"id\" ASC LIMIT ?"
+            7 20]
+           (sql/select book {:order [] :after [7] :limit 20 :offset 9999})))))
+
+(deftest a-mixed-ordering-continues-in-the-right-direction
+  (let [book   (get-in model [:resources :book])
+        [sql & params] (sql/select book {:order [[:title :desc]] :after ["m" 3] :limit 5})]
+    (is (str/includes? sql "((\"title\" < ?) OR (\"title\" = ? AND \"id\" > ?))"))
+    (is (= ["m" "m" 3 5] params))))
+
+(deftest an-offset-is-not-used-once-a-cursor-is
+  (let [book (get-in model [:resources :book])]
+    (is (not (str/includes? (first (sql/select book {:after [1] :limit 5 :offset 500})) "OFFSET")))
+    (is (str/includes? (first (sql/select book {:limit 5 :offset 500})) "OFFSET"))))
+
+(deftest a-uniform-ordering-continues-by-row-where-the-dialect-allows
+  (let [book (get-in model [:resources :book])
+        [sql & params] (sql/select :h2 book {:order [[:title :asc]] :after ["m" 3] :limit 5})]
+    (is (str/includes? sql "(\"title\", \"id\") > (?, ?)"))
+    (is (= ["m" 3 5] params))))
+
+(deftest a-dialect-without-row-values-spells-it-out
+  (let [book (get-in model [:resources :book])
+        [sql] (sql/select :derby book {:order [[:title :asc]] :after ["m" 3] :limit 5})]
+    (is (str/includes? sql "((\"title\" > ?) OR (\"title\" = ? AND \"id\" > ?))"))))
+
+(deftest a-mixed-ordering-is-spelled-out-even-where-rows-compare
+  (let [book (get-in model [:resources :book])
+        [sql] (sql/select :h2 book {:order [[:title :desc]] :after ["m" 3] :limit 5})]
+    (is (str/includes? sql "((\"title\" < ?) OR (\"title\" = ? AND \"id\" > ?))"))))
+
+(deftest a-descending-pair-continues-downwards
+  (let [book (get-in model [:resources :book])
+        [sql] (sql/select :h2 book {:order [[:title :desc] [:id :desc]] :after ["m" 3] :limit 5})]
+    (is (str/includes? sql "(\"title\", \"id\") < (?, ?)"))))
