@@ -1,0 +1,51 @@
+name: E2E
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+      - name: Set up Leiningen
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/technomancy/leiningen/stable/bin/lein -o /usr/local/bin/lein
+          chmod +x /usr/local/bin/lein
+          lein version
+      - name: Cache Maven packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/project.clj') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+      - name: Install PostgreSQL
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql postgresql-contrib
+          sudo systemctl start postgresql
+          sudo -u postgres psql -c "CREATE USER hypermedia WITH PASSWORD 'hypermedia';"
+          sudo -u postgres psql -c "CREATE DATABASE hypermedia OWNER hypermedia;"
+      - name: Install MariaDB
+        run: |
+          sudo apt-get install -y mariadb-server
+          sudo systemctl start mariadb
+          sudo mysql -e "CREATE DATABASE hypermedia;"
+          sudo mysql -e "CREATE USER 'hypermedia'@'localhost' IDENTIFIED BY 'hypermedia';"
+          sudo mysql -e "GRANT ALL ON hypermedia.* TO 'hypermedia'@'localhost';"
+      - name: Run E2E tests
+        run: lein e2e
+        env:
+          HYPERMEDIA_ENGINES: h2,sqlite,hsqldb,derby,postgres,mariadb
+          LEIN_SNAPSHOTS_IN_RELEASE: allow

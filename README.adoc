@@ -8,14 +8,14 @@ served over JDBC. Nothing is written per resource.
 
 [source,shell]
 ----
-lein serve -s example.edn -d 'jdbc:h2:mem:demo;DB_CLOSE_DELAY=-1' -p 8181 --migrate
+java -jar target/uberjar/hypermedia-standalone.jar \
+  --schema example.edn \
+  --database 'jdbc:h2:mem:demo;DB_CLOSE_DELAY=-1' \
+  --migrate --port 8181
 export BASE=http://127.0.0.1:8181
 ----
 
-[cols="1,3"]
-|===
 | option | meaning
-
 | `-s --schema`      | a file, or something on the classpath
 | `-d --database`    | the jdbc url, which also picks the engine
 | `-p --port`        | 8080; zero binds any port and announces the one it got
@@ -26,13 +26,13 @@ export BASE=http://127.0.0.1:8181
 | `--quiet`          | do not log requests
 | `--migrate`        | bring the store to the schema before serving
 | `--plan`           | print what a migration would do, and do nothing
-|===
 
-`lein serve -- --help` lists them.
+`java -jar hypermedia-standalone.jar -- --help` lists them.
 
 == The schema it serves
 
 .resources/example.edn
+
 [source,clojure]
 ----
 {:curie "rel"
@@ -55,27 +55,41 @@ export BASE=http://127.0.0.1:8181
 == Walk it
 
 Everything below runs as written; generated ids will differ. Start at the root:
-every collection is linked, and the relations the platform invents are curied
-to the profile that describes them.
 
 [source,shell]
 ----
-curl -s $BASE/ | jq -c ._links
+$ http GET http://localhost:8181/
 ----
+
 [source,json]
 ----
-{"self":{"href":"/"},"profile":{"href":"/profile"},"rel:health":{"href":"/health"},
- "rel:authors":{"href":"/authors"},"rel:books":{"href":"/books"},
- "curies":[{"name":"rel","href":"/profile/{rel}","templated":true}]}
+{
+  "self": {"href": "/"},
+  "profile": {"href": "/profile"},
+  "rel:health": {"href": "/health"},
+  "rel:authors": {"href": "/authors"},
+  "rel:books": {"href": "/books"},
+  "curies": [{"name": "rel", "href": "/profile/{rel}", "templated": true}]
+}
 ----
 
-Create an author and keep the link it answers with.
+Create an author:
 
 [source,shell]
 ----
-AUTHOR=$(curl -s -D- -o /dev/null -X POST $BASE/authors \
-  -H 'Content-Type: application/json' -d '{"name":"Ursula Le Guin"}' \
-  | awk '/^[Ll]ocation:/{print $2}' | tr -d '\r')
+$ http POST $BASE/authors name="Ursula Le Guin"
+----
+
+[source,json]
+----
+{
+  "name": "Ursula Le Guin",
+  "_links": {
+    "self": {"href": "/authors/..."},
+    "profile": {"href": "/profile/authors"},
+    "rel:books": {"href": "/authors/.../books"}
+  }
+}
 ----
 
 Create a book against it. A client writes what it read: the relation takes the
@@ -83,50 +97,73 @@ link, not the key. `author` is declared `:embed`, so it comes back embedded.
 
 [source,shell]
 ----
-curl -s -X POST $BASE/books -H 'Content-Type: application/json' \
-  -d "{\"title\":\"A Wizard of Earthsea\",\"year\":1968,\"author\":\"$AUTHOR\"}" \
-  | jq -c '{title, author: ._embedded.author.name, self: ._links.self.href}'
-----
-[source,json]
-----
-{"title":"A Wizard of Earthsea","author":"Ursula Le Guin","self":"/books/bd28f25f-d311-4660-b1ba-2a5aca9a41e6"}
+$ http POST $BASE/books author=/authors/... title="A Wizard of Earthsea" year:=1968
 ----
 
-Two more, so there is something to page through.
+[source,json]
+----
+{
+  "title": "A Wizard of Earthsea",
+  "year": 1968,
+  "_links": {
+    "self": {"href": "/books/..."},
+    "profile": {"href": "/profile/books"},
+    "rel:author": {"href": "/books/.../author"},
+    "rel:projection": {"href": "/books/...{?projection}", "templated": true}
+  },
+  "_embedded": {
+    "author": {
+      "name": "Ursula Le Guin",
+      "_links": {"self": {"href": "/authors/..."}}
+    }
+  }
+}
+----
+
+Add two more books:
 
 [source,shell]
 ----
-curl -s -o /dev/null -X POST $BASE/books -H 'Content-Type: application/json' \
-  -d "{\"title\":\"The Tombs of Atuan\",\"year\":1971,\"author\":\"$AUTHOR\"}"
-curl -s -o /dev/null -X POST $BASE/books -H 'Content-Type: application/json' \
-  -d "{\"title\":\"The Farthest Shore\",\"year\":1972,\"author\":\"$AUTHOR\"}"
+$ http POST $BASE/books author=/authors/... title="The Tombs of Atuan" year:=1971
+$ http POST $BASE/books author=/authors/... title="The Farthest Shore" year:=1972
 ----
 
 A collection is a slice. `next` is a link to follow, not a URL to build.
 
 [source,shell]
 ----
-curl -s "$BASE/books?size=2&sort=title,asc" \
-  | jq -c '{page, titles: [._embedded.books[].title], next: ._links.next.href}'
+$ http GET "$BASE/books?size=2&sort=title,asc"
 ----
+
 [source,json]
 ----
-{"page":{"size":2,"totalElements":3,"totalPages":2,"number":0},
- "titles":["A Wizard of Earthsea","The Farthest Shore"],
- "next":"/books?page=1&size=2&sort=title%2Casc"}
+{
+  "page": {"size": 2, "totalElements": 3, "totalPages": 2, "number": 0},
+  "_links": {
+    "self": {"href": "/books?size=2&sort=title,asc"},
+    "next": {"href": "/books?page=1&size=2&sort=title,asc&after=..."}
+  },
+  "_embedded": {
+    "books": [
+      {"title": "A Wizard of Earthsea", ...},
+      {"title": "The Farthest Shore", ...}
+    ]
+  }
+}
 ----
 
 A declared search is a resource, and so is a relation.
 
 [source,shell]
 ----
-curl -s "$BASE/books/search/by-year?year=1971" | jq -c '[._embedded.books[].title]'
-curl -s "$BASE$AUTHOR/books"                   | jq -c '[._embedded.books[].title]'
+$ http GET "$BASE/books/search/by-year?year=1971"
+$ http GET "$BASE/authors/.../books"
 ----
+
 [source,json]
 ----
 ["The Tombs of Atuan"]
-["A Wizard of Earthsea","The Tombs of Atuan","The Farthest Shore"]
+["A Wizard of Earthsea", "The Tombs of Atuan", "The Farthest Shore"]
 ----
 
 A read carries an `ETag`. A write naming it is admitted once; the same tag a
@@ -134,50 +171,55 @@ second time has gone stale and is refused rather than merged.
 
 [source,shell]
 ----
-BOOK=$(curl -s "$BASE/books?size=1&sort=title,asc" | jq -r '._embedded.books[0]._links.self.href')
-ETAG=$(curl -s -D- -o /dev/null "$BASE$BOOK" | awk '/^ETag:/{print $2}' | tr -d '\r')
-curl -s -o /dev/null -w '%{http_code}\n' -X PATCH "$BASE$BOOK" \
-  -H 'Content-Type: application/json' -H "If-Match: $ETAG" -d '{"year":1969}'
-curl -s -o /dev/null -w '%{http_code}\n' -X PATCH "$BASE$BOOK" \
-  -H 'Content-Type: application/json' -H "If-Match: $ETAG" -d '{"year":1970}'
-----
-----
-200
-412
+$ http GET $BASE/books/...
+ETag: "0"
+
+$ http PATCH $BASE/books/... If-Match:"0" year:=1969
+→ 200 OK, year updated
+
+$ http PATCH $BASE/books/... If-Match:"0" year:=1970
+→ 412 Precondition Failed
 ----
 
-A submission that does not fit the schema is a problem document.
+A submission that does not fit the schema is a problem document (RFC 9457).
 
 [source,shell]
 ----
-curl -s -X POST $BASE/books -H 'Content-Type: application/json' -d '{"year":1968}' | jq -c .
-----
-[source,json]
-----
-{"type":"about:blank","title":"the submission does not fit the schema","status":422,
- "instance":"/books","errors":[{"field":"title","error":"missing"}]}
+$ http POST $BASE/books year:=1968
 ----
 
-Also served: `/health` reports the store rather than its own handle;
-`/profile/books` is an ALPS descriptor; `Accept: application/prs.hal-forms+json`
-adds `_templates` stating what may be written; `OPTIONS` answers `Allow`;
-`?projection=summary` narrows a document to what the schema declared.
+[source,json]
+----
+{
+  "type": "about:blank",
+  "title": "the submission does not fit the schema",
+  "status": 422,
+  "instance": "/books",
+  "errors": [{"field": "title", "error": "missing"}]
+}
+----
+
+Also served:
+- `/health` — reports the store, not its own handle
+- `/profile/books` — ALPS descriptor
+- `Accept: application/prs.hal-forms+json` — adds `_templates` for forms
+- `OPTIONS` — answers `Allow`
+- `?projection=summary` — narrows a document
 
 == Watching it
 
 Every answer carries `X-Request-Id`. One the caller brought is kept, so a
 gateway's identifier follows the request through; otherwise one is minted.
-The same identifier names the request in the log and in anything the server
-could not serve, so a report of a failure leads to the request that caused it.
+The same identifier names the request in the log.
 
+[source,shell]
 ----
 from-the-gateway GET /books 200 1ms
 3c247fa9-f72 POST /books 422 22ms
 3ffc0632-773 GET /books/nope 404 1ms
 ----
 
-Stopping lets requests in flight finish first, for as long as `--drain`
-allows.
+Stopping lets requests in flight finish first, for as long as `--drain` allows.
 
 == The schema language
 
@@ -215,9 +257,9 @@ is derived once:
 [source,clojure]
 ----
 :author {:relations {:books {:kind :many-to-many :target :book
-                             :through :authorship :via :author-id :target-via :book-id}}}
+                              :through :authorship :via :author-id :target-via :book-id}}}
 :book   {:relations {:authors {:kind :many-to-many :target :author
-                               :through :authorship :via :book-id :target-via :author-id}}}
+                                :through :authorship :via :book-id :target-via :author-id}}}
 ----
 
 `resources/catalogue.edn` is a complete one.
@@ -265,11 +307,13 @@ pays for the offset.
 
 [source,shell]
 ----
-lein serve -s example.edn -d 'jdbc:h2:./store' --plan
+$ java -jar hypermedia-standalone.jar \
+  --schema example.edn --database 'jdbc:h2:file:./store' --plan
 ----
 
+[source,shell]
 ----
-ALTER TABLE "books" ADD COLUMN "tag" VARCHAR(255)
+CREATE TABLE IF NOT EXISTS "books" ADD COLUMN "tag" VARCHAR(255)
 refused: books.year type-differs (schema says string, store holds bigint)
 ----
 
@@ -285,7 +329,8 @@ only means another instance got there first is retried rather than fatal.
 ----
 lein uberjar
 java -jar target/uberjar/hypermedia-standalone.jar \
-  -s example.edn -d 'jdbc:h2:mem:demo;DB_CLOSE_DELAY=-1' -p 8181 --migrate
+  --schema example.edn --database 'jdbc:h2:mem:demo;DB_CLOSE_DELAY=-1' \
+  --migrate --port 8181
 ----
 
 The jar carries every engine below, so it needs nothing but a JVM. A schema is

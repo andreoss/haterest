@@ -18,15 +18,15 @@
   :main hypermedia.main
 
   :profiles
-  {:drivers  {:dependencies [[com.h2database/h2 "2.3.232"]
-                             [org.xerial/sqlite-jdbc "3.46.1.3"]
-                             [org.hsqldb/hsqldb "2.7.3"]
-                             [org.apache.derby/derby "10.17.1.0"]
-                             [org.apache.derby/derbytools "10.17.1.0"]
-                             [org.apache.derby/derbyshared "10.17.1.0"]
-                             [org.postgresql/postgresql "42.7.4"]
-                             [org.mariadb.jdbc/mariadb-java-client "3.4.1"]
-                             [org.slf4j/slf4j-nop "2.0.16"]]}
+  {:drivers  {:dependencies [[com.h2database/h2 "2.3.232" :scope "runtime"]
+                             [org.xerial/sqlite-jdbc "3.46.1.3" :scope "runtime"]
+                             [org.hsqldb/hsqldb "2.7.3" :scope "runtime"]
+                             [org.apache.derby/derby "10.17.1.0" :scope "runtime"]
+                             [org.apache.derby/derbytools "10.17.1.0" :scope "runtime"]
+                             [org.apache.derby/derbyshared "10.17.1.0" :scope "runtime"]
+                             [org.postgresql/postgresql "42.7.4" :scope "runtime"]
+                             [org.mariadb.jdbc/mariadb-java-client "3.4.1" :scope "runtime"]
+                             [org.slf4j/slf4j-nop "2.0.16" :scope "runtime"]]}
 
    :tests    {:source-paths ["test"]
               :jvm-opts ["-Djdk.httpclient.allowRestrictedHeaders=connection"]}
@@ -37,7 +37,7 @@
 
    :sources  {:source-paths ["dev" "test"]}
 
-   :compiled {:aot [hypermedia.main]
+   :compiled {:aot :all
               :uberjar-name "hypermedia-standalone.jar"}
 
    :harness  [:drivers :tests :kaocha]
@@ -46,7 +46,17 @@
 
    :dev      [:drivers :sources]
 
-   :uberjar  [:drivers :compiled]}
+   :uberjar  {:dependencies [[com.h2database/h2 "2.3.232"]
+                             [org.xerial/sqlite-jdbc "3.46.1.3"]
+                             [org.hsqldb/hsqldb "2.7.3"]
+                             [org.apache.derby/derby "10.17.1.0"]
+                             [org.apache.derby/derbytools "10.17.1.0"]
+                             [org.apache.derby/derbyshared "10.17.1.0"]
+                             [org.postgresql/postgresql "42.7.4"]
+                             [org.mariadb.jdbc/mariadb-java-client "3.4.1"]
+                             [org.slf4j/slf4j-nop "2.0.16"]]
+              :aot :all
+              :uberjar-name "hypermedia-standalone.jar"}}
 
   :aliases
   {"test"    ["with-profile" "+harness" "run" "-m" "kaocha.runner" ":unit"]
